@@ -1,0 +1,12 @@
+.DS_Store
+*.d
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+*.out
+*.app
+build/*.h
