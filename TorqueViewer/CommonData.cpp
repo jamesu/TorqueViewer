@@ -29,6 +29,8 @@
 #include <cmath>
 #include <climits>
 #include <unordered_map>
+#include <iostream>
+#include <fstream>
 #include <slm/slmath.h>
 #include "CommonData.h"
 
@@ -558,4 +560,551 @@ bool MaterialList::loadFromPath(const char* path)
    }
    
    return true;
+}
+
+class Volume
+{
+public:
+
+   enum Sig : uint32_t
+   {
+      ZIP_LOCAL_FILE_HEADER_SIG = 0x04034b50,
+      ZIP_CENTRAL_DIR_HEADER_SIG = 0x02014b50,
+      ZIP_END_CENTRAL_DIR_SIG = 0x06054b50,
+      ZIP64_END_CENTRAL_DIR_SIG = 0x06064b50,
+      ZIP64_END_CENTRAL_DIR_LOC_SIG = 0x07064b50
+   };
+
+   enum Flag : uint32_t
+   {
+      FLAG_ENCRYPTED = (1<<0),
+      FLAG_COMPRESS1 = (1<<1),
+      FLAG_COMPRESS2 = (1<<2),
+      FLAG_HAS_DATA_DESC = (1<<3),
+      FLAG_DEFLATE2 = (1<<4),
+      FLAG_PATCH = (1<<5),
+      FLAG_ENCRYPTED2 = (1<<6),
+      FLAG_UTF8 = (1<<11),
+      FLAG_ENCRYPTED_CD = (1<<13)
+   };
+
+   enum ExtraTypes : uint16_t
+   {
+      TYPE_EXTRA_ZIP64 = (1<<0)
+   };
+
+#pragma pack(push, 2)
+   struct LocalHeader
+   {
+       uint32_t signature;
+       uint16_t version;
+       uint16_t flags;
+       uint16_t compression;
+       uint16_t mod_time;
+       uint16_t mod_date;
+       uint32_t crc32;
+       uint32_t compressed_size;
+       uint32_t uncompressed_size;
+       uint16_t file_name_length;
+       uint16_t extra_field_length;
+   };
+
+   struct ExtraFieldHeader
+   {
+       uint16_t type;
+       uint16_t size;
+   };
+
+   struct Zip64Field
+   {
+       uint64_t compressed_size;
+       uint64_t uncompressed_size;
+       uint64_t local_header_offset;
+       uint32_t disk_number_start;
+   };
+
+   struct CentralHeader
+   {
+       uint32_t signature;
+       uint16_t version_made_by;
+       uint16_t version_needed;
+       uint16_t flags;
+       uint16_t compression;
+       uint16_t mod_time;
+       uint16_t mod_date;
+       uint32_t crc32;
+       uint32_t compressed_size;
+       uint32_t uncompressed_size;
+       uint16_t file_name_length;
+       uint16_t extra_field_length;
+       uint16_t file_comment_length;
+       uint16_t disk_number_start;
+       uint16_t internal_file_attrs;
+       uint32_t external_file_attrs;
+       uint32_t local_header_offset;
+   };
+   
+   
+   struct EOCDRecord
+   {
+       uint32_t signature;
+       uint16_t disk_number;
+       uint16_t disk_cd;
+       uint16_t num_disk_entries;
+       uint16_t total_entries;
+       uint32_t cd_size;
+       uint32_t cd_offset;
+       uint16_t comment_length;
+   };
+
+   struct EOCD64Record
+   {
+    uint32_t signature;
+    uint64_t size_of_zip64_eocd;
+    uint16_t version_made_by;
+    uint16_t version_needed;
+    uint32_t disk_number;
+    uint32_t central_dir_disk;
+    uint64_t total_entries_on_disk;
+    uint64_t total_entries;
+    uint64_t central_dir_size;
+    uint64_t central_dir_offset;
+   };
+
+   struct EOCD64Locator
+   {
+       uint32_t signature;
+       uint32_t disk_number;
+       uint64_t eocd_offset;
+       uint32_t total_disks;
+   };
+   
+#pragma pack(pop)
+
+   struct Entry
+   {
+      uint16_t flags;
+      uint16_t compression;
+      uint16_t filenameSize;
+      uint64_t filenameOffset;
+      uint64_t dataOffset;
+      uint64_t compressedSize;
+      uint64_t uncompressedSize;
+
+      std::string_view getFilename(const char* data)
+      {
+         const char* name = data + filenameOffset;
+         return std::string_view(name, filenameSize);
+      }
+      
+      const char* getFilenamePtr(const char* data) const
+      {
+         return data + filenameOffset;
+      }
+   };
+   
+   std::vector<CentralHeader> mCentralHeaders;
+   std::vector<Entry> mEntries;
+   std::vector<char> mCDData;
+
+   std::ifstream mFile;
+   std::string mName;
+
+   inline const char* getCDData()
+   {
+      return &mCDData[0];
+   }
+   
+   Volume()
+   {
+   }
+   
+   ~Volume()
+   {
+      if (mFile.is_open())
+      {
+         mFile.close();
+      }
+   }
+
+   bool readEOCD(std::ifstream& stream, EOCDRecord& eoCD, EOCD64Record& eoCD64)
+   {
+      static const uint64_t MaxEOCDSize = sizeof(EOCDRecord) + 65535;
+      char buffer[MaxEOCDSize];
+
+      stream.seekg(0, std::ios_base::end);
+      std::streampos fileSize = stream.tellg();
+      uint64_t size = static_cast<uint64_t>(fileSize);
+      uint64_t maxSize = std::min<uint64_t>(MaxEOCDSize, size);
+      if (maxSize < sizeof(sizeof(EOCDRecord)))
+         return false;
+
+      stream.seekg(size - maxSize);
+      stream.read(buffer, maxSize);
+
+      bool hasEOCD = false;
+      uint64_t eoCDOffset = 0;
+
+      for (int64_t offset = (int64_t)maxSize - sizeof(EOCDRecord); offset >= 0; offset--)
+      {
+         const uint32_t* ptr = reinterpret_cast<uint32_t*>(&buffer[offset]);
+         if (*ptr == ZIP_END_CENTRAL_DIR_SIG)
+         {
+            eoCD = *reinterpret_cast<const EOCDRecord*>(ptr);
+            eoCDOffset = (size - maxSize) + offset;
+            hasEOCD = true;
+            break;
+         }
+      }
+
+      if (!hasEOCD)
+      {
+         return false;
+      }
+
+      // See if we have zip64 EOCD
+
+      maxSize = std::min<uint64_t>(sizeof(EOCD64Locator), eoCDOffset);
+
+      if (maxSize >= sizeof(EOCD64Locator))
+      {
+         EOCD64Locator locator;
+         stream.seekg(eoCDOffset - sizeof(EOCD64Locator));
+         stream.read(reinterpret_cast<char*>(&locator), sizeof(EOCD64Locator));
+
+         if (locator.signature == ZIP64_END_CENTRAL_DIR_LOC_SIG)
+         {
+            stream.seekg(locator.eocd_offset);
+            stream.read(reinterpret_cast<char*>(&eoCD64), sizeof(EOCD64Record));
+         }
+      }
+
+      return true;
+   }
+   
+   bool read(std::ifstream& stream)
+   {
+      EOCDRecord eoCD;
+      EOCD64Record eoCD64;
+
+      if (!readEOCD(stream, eoCD, eoCD64))
+      {
+         return false;
+      }
+
+      // Seek to CD
+      uint64_t cdStart = eoCD.cd_offset;
+      uint64_t cdSize = eoCD.cd_size;
+      uint64_t totalFiles = eoCD.total_entries;
+
+      if (cdStart == 0xFFFFFFFF && eoCD64.signature == ZIP64_END_CENTRAL_DIR_LOC_SIG)
+      {
+         // zip64
+         cdStart = eoCD64.central_dir_offset;
+         cdSize = eoCD64.central_dir_size;
+         totalFiles = eoCD64.total_entries;
+      }
+
+      mCDData.resize(cdSize+1);
+      stream.seekg(cdStart);
+      stream.read(&mCDData[0], eoCD64.central_dir_size);
+      mCDData[cdSize] = 0;
+
+      // Populate entries
+      mEntries.resize(totalFiles);
+      CentralHeader* headerPtr = (CentralHeader*)&mCDData[0];
+      CentralHeader* endHeader = (CentralHeader*)&mCDData[cdSize];
+      for (uint32_t i=0; i<totalFiles; i++)
+      {
+         Entry& e = mEntries[i];
+         if (headerPtr >= endHeader ||
+            headerPtr->signature != ZIP_CENTRAL_DIR_HEADER_SIG)
+         {
+            return false;
+         }
+
+         e.flags = headerPtr->flags;
+         e.compression = headerPtr->compression;
+         e.filenameSize = headerPtr->file_name_length;
+         e.filenameOffset = (uint8_t*)(headerPtr+1) - ((uint8_t*)&mCDData[0]);
+         e.dataOffset = 0;
+         e.compressedSize = headerPtr->compressed_size;
+         e.uncompressedSize = headerPtr->uncompressed_size;
+         
+         uint64_t extraLen = headerPtr->file_name_length + headerPtr->file_comment_length + headerPtr->extra_field_length;
+         headerPtr++;
+         headerPtr = (CentralHeader*)(((uint8_t*)headerPtr) + extraLen);
+      }
+      
+      for (Entry& e : mEntries)
+      {
+         std::string name(e.getFilename(&mCDData[0]));
+         printf("File: %s\n", name.c_str());
+      }
+
+      return true;
+   }
+
+   static bool handleDeflate(MemRStream& inStream, MemRStream& outStream)
+   {
+   }
+   
+   bool openStream(std::ifstream& stream, const char* filename, MemRStream& outStream)
+   {
+      uint32_t fnLen = strlen(filename);
+      for (std::vector<Entry>::const_iterator itr = mEntries.begin(), itrEnd = mEntries.end(); itr != itrEnd; itr++)
+      {
+         if (fnLen == itr->filenameSize &&
+             strncasecmp(filename, itr->getFilenamePtr(&mCDData[0]), fnLen) == 0)
+         {
+            stream.seekg(itr->filenameOffset);
+            if (stream.fail())
+            {
+               return false;
+            }
+
+            // Read past local entry
+            LocalHeader lh = {};
+            stream.read((char*)&lh, sizeof(LocalHeader));
+            if (lh.signature != ZIP_LOCAL_FILE_HEADER_SIG)
+            {
+               return false;
+            }
+
+            uint64_t start = stream.tellg();
+            stream.seekg(start + lh.file_name_length + lh.extra_field_length);
+            if (stream.fail())
+            {
+               return false;
+            }
+
+            uint8_t* dataIn = (uint8_t*)malloc(itr->compressedSize);
+            uint8_t* dataOut = NULL;
+
+            stream.read((char*)dataIn, itr->compressedSize);
+            if (stream.fail())
+            {
+               free(dataIn);
+               return false;
+            }
+
+            if (itr->compression != 0)
+            {
+               // Validate compression
+               dataOut = (uint8_t*)malloc(itr->uncompressedSize);
+            }
+
+            outStream = MemRStream(itr->uncompressedSize, dataOut ? dataOut : dataIn, true);
+            if (dataIn != dataOut)
+            {
+               free(dataIn);
+            }
+
+            return true;
+         }
+      }
+      
+      return NULL;
+   }
+};
+
+
+
+std::unordered_map<std::string, ResManager::CreateFunc> ResManager::smCreateFuncs;
+
+void ResManager::registerCreateFunc(const char* ext, CreateFunc func)
+{
+   smCreateFuncs[ext] = func;
+}
+
+void ResManager::addVolume(const char *filename)
+{
+   std::ifstream file(filename, std::ios::binary);
+
+   if (file.is_open())
+   {
+      Volume* vol = new Volume();
+      if (!vol->read(file))
+      {
+         delete vol;
+         return;
+      }
+      
+      vol->mFile = std::move(file);
+      vol->mName = filename;
+      mVolumes.push_back(vol);
+   }
+}
+
+bool ResManager::openFile(const char *filename, MemRStream &stream, int32_t forceMount)
+{
+   // Check cwd
+   int count = 0;
+   for (std::string &path: mPaths)
+   {
+      if (forceMount >= 0 && count != forceMount)
+      {
+         count++;
+         continue;
+      }
+      char buffer[PATH_MAX];
+      snprintf(buffer, PATH_MAX, "%s/%s", path.c_str(), filename);
+      std::ifstream file(filename, std::ios::binary | std::ios::ate);
+      if (file.is_open())
+      {
+         uint64_t size = file.tellg();
+         file.seekg(0);
+         uint8_t* data = (uint8_t*)malloc(size);
+         file.read((char*)data, size);
+         
+         if (!file.fail())
+         {
+            stream = MemRStream(size, data, true);
+            file.close();
+            return true;
+         }
+         free(data);
+         file.close();
+         return false;
+      }
+      count++;
+   }
+   
+   // Scan volumes
+   for (Volume* vol: mVolumes)
+   {
+      if (forceMount >= 0 && count != forceMount)
+      {
+         count++;
+         continue;
+      }
+      if (vol->openStream(vol->mFile, filename, stream))
+      {
+         printf("Loaded volume file %s from volume\n", filename);
+         return true;
+      }
+      count++;
+   }
+   
+   return false;
+}
+
+void ResManager::enumerateVolume(uint32_t idx, std::vector<EnumEntry> &outList, std::vector<std::string> *restrictExts)
+{
+   for (Volume::Entry &e : mVolumes[idx]->mEntries)
+   {
+      if (restrictExts)
+      {
+         fs::path filePath = e.getFilename(mVolumes[idx]->getCDData());
+         std::string  ext = filePath.extension();
+         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+         
+         bool found = false;
+         for (std::string &restrictExt : *restrictExts)
+         {
+            if (ext == restrictExt)
+            {
+               found = true;
+               break;
+            }
+         }
+         
+         if (!found)
+            continue;
+      }
+      
+      std::string_view theName = e.getFilename(mVolumes[idx]->getCDData());
+      outList.emplace_back(EnumEntry(theName, mPaths.size()+idx));
+   }
+}
+
+void ResManager::enumeratePath(uint32_t idx, std::vector<EnumEntry> &outList, std::vector<std::string> *restrictExts)
+{
+   for (const fs::directory_entry &itr : fs::directory_iterator(mPaths[idx]))
+   {
+      if (restrictExts)
+      {
+         fs::path filePath = itr.path().filename().c_str();
+         std::string  ext = filePath.extension();
+         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+         
+         bool found = false;
+         for (std::string &restrictExt : *restrictExts)
+         {
+            if (ext == restrictExt)
+            {
+               found = true;
+               break;
+            }
+         }
+         
+         if (!found)
+            continue;
+      }
+      outList.emplace_back(EnumEntry(itr.path().filename().c_str(), idx));
+   }
+}
+
+void ResManager::enumerateFiles(std::vector<EnumEntry> &outList, int restrictIdx, std::vector<std::string> *restrictExt)
+{
+   for (int i=0; i<mPaths.size(); i++)
+   {
+      if (restrictIdx >= 0 && restrictIdx != i)
+         continue;
+      enumeratePath(i, outList, restrictExt);
+   }
+   for (int i=0; i<mVolumes.size(); i++)
+   {
+      if (restrictIdx >= 0 && restrictIdx != mPaths.size()+i)
+         continue;
+      enumerateVolume(i, outList, restrictExt);
+   }
+}
+
+void ResManager::enumerateSearchPaths(std::vector<const char*> &outList)
+{
+   for (int i=0; i<mPaths.size(); i++)
+   {
+      outList.push_back(mPaths[i].c_str());
+   }
+   for (int i=0; i<mVolumes.size(); i++)
+   {
+      outList.push_back(mVolumes[i]->mName.c_str());
+   }
+}
+
+const char *ResManager::getMountName(uint32_t idx)
+{
+   if (idx < mPaths.size())
+      return mPaths[idx].c_str();
+   idx -= mPaths.size();
+   if (idx < mVolumes.size())
+      return mVolumes[idx]->mName.c_str();
+   return "NULL";
+}
+
+ResourceInstance* ResManager::createResource(const char *filename, int32_t forceMount)
+{
+   MemRStream stream;
+   const char* ext = strrchr(filename, '.');
+   if (!ext)
+      return NULL;
+   
+   auto itr = smCreateFuncs.find(ext);
+   if (itr == smCreateFuncs.end())
+      return NULL;
+   
+   if (openFile(filename, stream, forceMount))
+   {
+      ResourceInstance* inst = itr->second();
+      if (!inst->read(stream))
+      {
+         delete inst;
+         return NULL;
+      }
+      
+      return inst;
+   }
+   
+   return NULL;
 }

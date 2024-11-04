@@ -28,6 +28,14 @@
 #include <slm/slmath.h>
 #include <string>
 
+#ifndef NO_BOOST
+#include <boost/filesystem.hpp>
+namespace fs = boost::filesystem;
+#else
+#include <filesystem>
+namespace fs = std::filesystem;
+#endif
+
 #define BIT(x) (((uint32_t)1)<<(x))
 
 struct _LineVert
@@ -875,6 +883,52 @@ struct Box
 class ResourceInstance
 {
 public:
+   virtual ~ResourceInstance()
+   {
+   }
+   virtual bool read(MemRStream& s) = 0;
+};
+
+class Volume;
+
+class ResManager
+{
+public:
+   
+   struct EnumEntry
+   {
+      std::string filename;
+      uint32_t mountIdx;
+      
+      EnumEntry() {;}
+      EnumEntry(const char* name, uint32_t m) : filename(name), mountIdx(m) {;}
+      EnumEntry(std::string_view& name, uint32_t m) : filename(name), mountIdx(m) {;}
+   };
+   
+   std::vector<Volume*> mVolumes;
+   std::vector<std::string> mPaths;
+   
+   typedef std::function<ResourceInstance*()> CreateFunc;
+   static std::unordered_map<std::string, ResManager::CreateFunc> smCreateFuncs;
+   
+   static void registerCreateFunc(const char* ext, CreateFunc func);
+   static void initStatics();
+   
+   void addVolume(const char *filename);
+   
+   bool openFile(const char *filename, MemRStream &stream, int32_t forceMount=-1);
+   
+   void enumerateVolume(uint32_t idx, std::vector<EnumEntry> &outList, std::vector<std::string> *restrictExts);
+   
+   void enumeratePath(uint32_t idx, std::vector<EnumEntry> &outList, std::vector<std::string> *restrictExts);
+   
+   void enumerateFiles(std::vector<EnumEntry> &outList, int restrictIdx=-1, std::vector<std::string> *restrictExt=NULL);
+   
+   void enumerateSearchPaths(std::vector<const char*> &outList);
+   
+   const char *getMountName(uint32_t idx);
+   
+   ResourceInstance* createResource(const char *filename, int32_t forceMount=-1);
 };
 
 class MaterialList : public ResourceInstance
