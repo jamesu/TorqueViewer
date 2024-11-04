@@ -102,6 +102,7 @@ endif()
 # Collect source files
 file(GLOB TRIBESVIEWER_SRC
     "TorqueViewer/*.cpp"
+    "TorqueViewer/*.h"
     "slm/*.cpp"
     "imgui/*.cpp"
     ${PLATFORM_GLOBS}

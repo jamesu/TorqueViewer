@@ -121,10 +121,10 @@ struct Primitive
    
    int firstElement;
    int numElements;
-   Type matindex;
+   Type matIndex;
    
    Primitive(int fe=0, int ne=0, Type ty=Triangles) :
-   firstElement(fe), numElements(ne), matindex(ty)
+   firstElement(fe), numElements(ne), matIndex(ty)
    {
    }
 };
@@ -538,7 +538,7 @@ public:
          return 0;
       
       for (const auto& p : data->primitives) {
-         if (p.matindex & Primitive::Strip) {
+         if (p.matIndex & Primitive::Strip) {
             count += p.numElements - 2;
          } else {
             count += p.numElements / 3;
@@ -780,16 +780,16 @@ protected:
    std::vector<DecalState> mDecalStates;
    
    // Keyframe data
-   std::vector<slm::quat> mDefaultRotations;
+   std::vector<Quat16> mDefaultRotations;
    std::vector<slm::vec3> mDefaultTranslations;
    std::vector<slm::vec3> mNodeTranslations;
-   std::vector<slm::quat> mNodeRotations;
+   std::vector<Quat16> mNodeRotations;
    std::vector<float> mNodeUniformScales;
    std::vector<slm::vec3> mNodeAlignedScales;
    std::vector<slm::vec3> mNodeArbitraryScaleFactors;
-   std::vector<slm::quat> mNodeArbitraryScaleRotations;
+   std::vector<Quat16> mNodeArbitraryScaleRotations;
    std::vector<slm::vec3> mGroundTranslations;
-   std::vector<slm::quat> mGroundRotations;
+   std::vector<Quat16> mGroundRotations;
    
    // Detail level state
    std::vector<float> mAlphaIn;

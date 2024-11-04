@@ -1012,7 +1012,36 @@ inline char* MaterialList::stripToolPath(char* name)
    
 }
 
-
+// 16-bit quat type (same as torque)
+struct Quat16
+{
+   enum { MAX_VAL = 0x7fff };
+   
+   int16_t x, y, z, w;
+   
+   Quat16() : x(0),y(0),z(0),w(0) {;}
+   
+   Quat16(const slm::quat &src)
+   {
+      x = src.x * float(MAX_VAL);
+      y = src.y * float(MAX_VAL);
+      z = src.z * float(MAX_VAL);
+      w = src.w * float(MAX_VAL);
+   }
+   
+   slm::quat toQuat() const
+   {
+      slm::quat outQuat;
+      outQuat.x = float(x) / float(MAX_VAL);
+      outQuat.y = float(y) / float(MAX_VAL);
+      outQuat.z = float(z) / float(MAX_VAL);
+      outQuat.w = float(w) / float(MAX_VAL);
+      return outQuat;
+   }
+   
+   bool operator==(const Quat16 &q) const { return( x == q.x && y == q.y && z == q.z && w == q.w ); }
+   bool operator!=( const Quat16 & q ) const { return !(*this == q); }
+};
 
 
 #endif /* SharedRender_h */
