@@ -48,6 +48,7 @@ namespace fs = std::filesystem;
 #endif
 
 #include "CommonData.h"
+#include "shapeData.h"
 #include "CommonShaderTypes.h"
 #include "RendererHelper.h"
 
@@ -141,535 +142,6 @@ void CompatQuatSetMatrix(const slm::quat rot, slm::mat4 &outMat)
 
 #include "CommonData.h"
 
-class Volume
-{
-public:
-
-   enum Sig : uint32_t
-   {
-      ZIP_LOCAL_FILE_HEADER_SIG = 0x04034b50,
-      ZIP_CENTRAL_DIR_HEADER_SIG = 0x02014b50,
-      ZIP_END_CENTRAL_DIR_SIG = 0x06054b50,
-      ZIP64_END_CENTRAL_DIR_SIG = 0x06064b50,
-      ZIP64_END_CENTRAL_DIR_LOC_SIG = 0x07064b50
-   };
-
-   enum Flag : uint32_t
-   {
-      FLAG_ENCRYPTED = (1<<0),
-      FLAG_COMPRESS1 = (1<<1),
-      FLAG_COMPRESS2 = (1<<2),
-      FLAG_HAS_DATA_DESC = (1<<3),
-      FLAG_DEFLATE2 = (1<<4),
-      FLAG_PATCH = (1<<5),
-      FLAG_ENCRYPTED2 = (1<<6),
-      FLAG_UTF8 = (1<<11),
-      FLAG_ENCRYPTED_CD = (1<<13)
-   };
-
-   enum ExtraTypes : uint16_t
-   {
-      TYPE_EXTRA_ZIP64 = (1<<0)
-   };
-
-#pragma pack(push, 2)
-   struct LocalHeader
-   {
-       uint32_t signature;
-       uint16_t version;
-       uint16_t flags;
-       uint16_t compression;
-       uint16_t mod_time;
-       uint16_t mod_date;
-       uint32_t crc32;
-       uint32_t compressed_size;
-       uint32_t uncompressed_size;
-       uint16_t file_name_length;
-       uint16_t extra_field_length;
-   };
-
-   struct ExtraFieldHeader
-   {
-       uint16_t type;
-       uint16_t size;
-   };
-
-   struct Zip64Field
-   {
-       uint64_t compressed_size;
-       uint64_t uncompressed_size;
-       uint64_t local_header_offset;
-       uint32_t disk_number_start;
-   };
-
-   struct CentralHeader
-   {
-       uint32_t signature;
-       uint16_t version_made_by;
-       uint16_t version_needed;
-       uint16_t flags;
-       uint16_t compression;
-       uint16_t mod_time;
-       uint16_t mod_date;
-       uint32_t crc32;
-       uint32_t compressed_size;
-       uint32_t uncompressed_size;
-       uint16_t file_name_length;
-       uint16_t extra_field_length;
-       uint16_t file_comment_length;
-       uint16_t disk_number_start;
-       uint16_t internal_file_attrs;
-       uint32_t external_file_attrs;
-       uint32_t local_header_offset;
-   };
-   
-   
-   struct EOCDRecord
-   {
-       uint32_t signature;
-       uint16_t disk_number;
-       uint16_t disk_cd;
-       uint16_t num_disk_entries;
-       uint16_t total_entries;
-       uint32_t cd_size;
-       uint32_t cd_offset;
-       uint16_t comment_length;
-   };
-
-   struct EOCD64Record
-   {
-    uint32_t signature;
-    uint64_t size_of_zip64_eocd;
-    uint16_t version_made_by;
-    uint16_t version_needed;
-    uint32_t disk_number;
-    uint32_t central_dir_disk;
-    uint64_t total_entries_on_disk;
-    uint64_t total_entries;
-    uint64_t central_dir_size;
-    uint64_t central_dir_offset;
-   };
-
-   struct EOCD64Locator
-   {
-       uint32_t signature;
-       uint32_t disk_number;
-       uint64_t eocd_offset;
-       uint32_t total_disks;
-   };
-   
-#pragma pack(pop)
-
-   struct Entry
-   {
-      uint16_t flags;
-      uint16_t compression;
-      uint16_t filenameSize;
-      uint64_t filenameOffset;
-      uint64_t dataOffset;
-      uint64_t compressedSize;
-      uint64_t uncompressedSize;
-
-      std::string_view getFilename(const char* data)
-      {
-         const char* name = data + filenameOffset;
-         return std::string_view(name, filenameSize);
-      }
-      
-      const char* getFilenamePtr(const char* data) const
-      {
-         return data + filenameOffset;
-      }
-   };
-   
-   std::vector<CentralHeader> mCentralHeaders;
-   std::vector<Entry> mEntries;
-   std::vector<char> mCDData;
-
-   std::ifstream mFile;
-   std::string mName;
-
-   inline const char* getCDData()
-   {
-      return &mCDData[0];
-   }
-   
-   Volume()
-   {
-   }
-   
-   ~Volume()
-   {
-      if (mFile.is_open())
-      {
-         mFile.close();
-      }
-   }
-
-   bool readEOCD(std::ifstream& stream, EOCDRecord& eoCD, EOCD64Record& eoCD64)
-   {
-      static const uint64_t MaxEOCDSize = sizeof(EOCDRecord) + 65535;
-      char buffer[MaxEOCDSize];
-
-      stream.seekg(0, std::ios_base::end);
-      std::streampos fileSize = stream.tellg();
-      uint64_t size = static_cast<uint64_t>(fileSize);
-      uint64_t maxSize = std::min<uint64_t>(MaxEOCDSize, size);
-      if (maxSize < sizeof(sizeof(EOCDRecord)))
-         return false;
-
-      stream.seekg(size - maxSize);
-      stream.read(buffer, maxSize);
-
-      bool hasEOCD = false;
-      uint64_t eoCDOffset = 0;
-
-      for (int64_t offset = (int64_t)maxSize - sizeof(EOCDRecord); offset >= 0; offset--)
-      {
-         const uint32_t* ptr = reinterpret_cast<uint32_t*>(&buffer[offset]);
-         if (*ptr == ZIP_END_CENTRAL_DIR_SIG)
-         {
-            eoCD = *reinterpret_cast<const EOCDRecord*>(ptr);
-            eoCDOffset = (size - maxSize) + offset;
-            hasEOCD = true;
-            break;
-         }
-      }
-
-      if (!hasEOCD)
-      {
-         return false;
-      }
-
-      // See if we have zip64 EOCD
-
-      maxSize = std::min<uint64_t>(sizeof(EOCD64Locator), eoCDOffset);
-
-      if (maxSize >= sizeof(EOCD64Locator))
-      {
-         EOCD64Locator locator;
-         stream.seekg(eoCDOffset - sizeof(EOCD64Locator));
-         stream.read(reinterpret_cast<char*>(&locator), sizeof(EOCD64Locator));
-
-         if (locator.signature == ZIP64_END_CENTRAL_DIR_LOC_SIG)
-         {
-            stream.seekg(locator.eocd_offset);
-            stream.read(reinterpret_cast<char*>(&eoCD64), sizeof(EOCD64Record));
-         }
-      }
-
-      return true;
-   }
-   
-   bool read(std::ifstream& stream)
-   {
-      EOCDRecord eoCD;
-      EOCD64Record eoCD64;
-
-      if (!readEOCD(stream, eoCD, eoCD64))
-      {
-         return false;
-      }
-
-      // Seek to CD
-      uint64_t cdStart = eoCD.cd_offset;
-      uint64_t cdSize = eoCD.cd_size;
-      uint64_t totalFiles = eoCD.total_entries;
-
-      if (cdStart == 0xFFFFFFFF && eoCD64.signature == ZIP64_END_CENTRAL_DIR_LOC_SIG)
-      {
-         // zip64
-         cdStart = eoCD64.central_dir_offset;
-         cdSize = eoCD64.central_dir_size;
-         totalFiles = eoCD64.total_entries;
-      }
-
-      mCDData.resize(cdSize+1);
-      stream.seekg(cdStart);
-      stream.read(&mCDData[0], eoCD64.central_dir_size);
-      mCDData[cdSize] = 0;
-
-      // Populate entries
-      mEntries.resize(totalFiles);
-      CentralHeader* headerPtr = (CentralHeader*)&mCDData[0];
-      CentralHeader* endHeader = (CentralHeader*)&mCDData[cdSize];
-      for (uint32_t i=0; i<totalFiles; i++)
-      {
-         Entry& e = mEntries[i];
-         if (headerPtr >= endHeader ||
-            headerPtr->signature != ZIP_CENTRAL_DIR_HEADER_SIG)
-         {
-            return false;
-         }
-
-         e.flags = headerPtr->flags;
-         e.compression = headerPtr->compression;
-         e.filenameSize = headerPtr->file_name_length;
-         e.filenameOffset = (uint8_t*)(headerPtr+1) - ((uint8_t*)&mCDData[0]);
-         e.dataOffset = 0;
-         e.compressedSize = headerPtr->compressed_size;
-         e.uncompressedSize = headerPtr->uncompressed_size;
-         
-         uint64_t extraLen = headerPtr->file_name_length + headerPtr->file_comment_length + headerPtr->extra_field_length;
-         headerPtr++;
-         headerPtr = (CentralHeader*)(((uint8_t*)headerPtr) + extraLen);
-      }
-      
-      for (Entry& e : mEntries)
-      {
-         std::string name(e.getFilename(&mCDData[0]));
-         printf("File: %s\n", name.c_str());
-      }
-
-      return true;
-   }
-
-   static bool handleDeflate(MemRStream& inStream, MemRStream& outStream)
-   {
-   }
-   
-   bool openStream(std::ifstream& stream, const char* filename, MemRStream& outStream)
-   {
-      uint32_t fnLen = strlen(filename);
-      for (std::vector<Entry>::const_iterator itr = mEntries.begin(), itrEnd = mEntries.end(); itr != itrEnd; itr++)
-      {
-         if (fnLen == itr->filenameSize &&
-             strncasecmp(filename, itr->getFilenamePtr(&mCDData[0]), fnLen) == 0)
-         {
-            stream.seekg(itr->filenameOffset);
-            if (stream.fail())
-            {
-               return false;
-            }
-
-            // Read past local entry
-            LocalHeader lh = {};
-            stream.read((char*)&lh, sizeof(LocalHeader));
-            if (lh.signature != ZIP_LOCAL_FILE_HEADER_SIG)
-            {
-               return false;
-            }
-
-            uint64_t start = stream.tellg();
-            stream.seekg(start + lh.file_name_length + lh.extra_field_length);
-            if (stream.fail())
-            {
-               return false;
-            }
-
-            uint8_t* dataIn = (uint8_t*)malloc(itr->compressedSize);
-            uint8_t* dataOut = NULL;
-
-            stream.read((char*)dataIn, itr->compressedSize);
-            if (stream.fail())
-            {
-               free(dataIn);
-               return false;
-            }
-
-            if (itr->compression != 0)
-            {
-               // Validate compression
-               dataOut = (uint8_t*)malloc(itr->uncompressedSize);
-            }
-
-            outStream = MemRStream(itr->uncompressedSize, dataOut ? dataOut : dataIn, true);
-            if (dataIn != dataOut)
-            {
-               free(dataIn);
-            }
-
-            return true;
-         }
-      }
-      
-      return NULL;
-   }
-};
-
-class ResManager
-{
-public:
-   
-   struct EnumEntry
-   {
-      std::string filename;
-      uint32_t mountIdx;
-      
-      EnumEntry() {;}
-      EnumEntry(const char* name, uint32_t m) : filename(name), mountIdx(m) {;}
-      EnumEntry(std::string_view& name, uint32_t m) : filename(name), mountIdx(m) {;}
-   };
-   
-   std::vector<Volume*> mVolumes;
-   std::vector<std::string> mPaths;
-   
-   void addVolume(const char *filename)
-   {
-      std::ifstream file(filename, std::ios::binary);
-
-      if (file.is_open())
-      {
-         Volume* vol = new Volume();
-         if (!vol->read(file))
-         {
-            delete vol;
-            return;
-         }
-         
-         vol->mFile = std::move(file);
-         vol->mName = filename;
-         mVolumes.push_back(vol);
-      }
-   }
-   
-   bool openFile(const char *filename, MemRStream &stream, int32_t forceMount=-1)
-   {
-      // Check cwd
-      int count = 0;
-      for (std::string &path: mPaths)
-      {
-         if (forceMount >= 0 && count != forceMount)
-         {
-            count++;
-            continue;
-         }
-         char buffer[PATH_MAX];
-         snprintf(buffer, PATH_MAX, "%s/%s", path.c_str(), filename);
-         std::ifstream file(filename, std::ios::binary | std::ios::ate);
-         if (file.is_open())
-         {
-            uint64_t size = file.tellg();
-            file.seekg(0);
-            uint8_t* data = (uint8_t*)malloc(size);
-            file.read((char*)data, size);
-            
-            if (!file.fail())
-            {
-               stream = MemRStream(size, data, true);
-               file.close();
-               return true;
-            }
-            free(data);
-            file.close();
-            return false;
-         }
-         count++;
-      }
-      
-      // Scan volumes
-      for (Volume* vol: mVolumes)
-      {
-         if (forceMount >= 0 && count != forceMount)
-         {
-            count++;
-            continue;
-         }
-         if (vol->openStream(vol->mFile, filename, stream))
-         {
-            printf("Loaded volume file %s from volume\n", filename);
-            return true;
-         }
-         count++;
-      }
-      
-      return false;
-   }
-   
-   void enumerateVolume(uint32_t idx, std::vector<EnumEntry> &outList, std::vector<std::string> *restrictExts)
-   {
-      for (Volume::Entry &e : mVolumes[idx]->mEntries)
-      {
-         if (restrictExts)
-         {
-            fs::path filePath = e.getFilename(mVolumes[idx]->getCDData());
-            std::string  ext = filePath.extension();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            
-            bool found = false;
-            for (std::string &restrictExt : *restrictExts)
-            {
-               if (ext == restrictExt)
-               {
-                  found = true;
-                  break;
-               }
-            }
-            
-            if (!found)
-               continue;
-         }
-         
-         std::string_view theName = e.getFilename(mVolumes[idx]->getCDData());
-         outList.emplace_back(EnumEntry(theName, mPaths.size()+idx));
-      }
-   }
-   
-   void enumeratePath(uint32_t idx, std::vector<EnumEntry> &outList, std::vector<std::string> *restrictExts)
-   {
-      for (const fs::directory_entry &itr : fs::directory_iterator(mPaths[idx]))
-      {
-         if (restrictExts)
-         {
-            fs::path filePath = itr.path().filename().c_str();
-            std::string  ext = filePath.extension();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            
-            bool found = false;
-            for (std::string &restrictExt : *restrictExts)
-            {
-               if (ext == restrictExt)
-               {
-                  found = true;
-                  break;
-               }
-            }
-            
-            if (!found)
-               continue;
-         }
-         outList.emplace_back(EnumEntry(itr.path().filename().c_str(), idx));
-      }
-   }
-   
-   void enumerateFiles(std::vector<EnumEntry> &outList, int restrictIdx=-1, std::vector<std::string> *restrictExt=NULL)
-   {
-      for (int i=0; i<mPaths.size(); i++)
-      {
-         if (restrictIdx >= 0 && restrictIdx != i)
-            continue;
-         enumeratePath(i, outList, restrictExt);
-      }
-      for (int i=0; i<mVolumes.size(); i++)
-      {
-         if (restrictIdx >= 0 && restrictIdx != mPaths.size()+i)
-            continue;
-         enumerateVolume(i, outList, restrictExt);
-      }
-   }
-   
-   void enumerateSearchPaths(std::vector<const char*> &outList)
-   {
-      for (int i=0; i<mPaths.size(); i++)
-      {
-         outList.push_back(mPaths[i].c_str());
-      }
-      for (int i=0; i<mVolumes.size(); i++)
-      {
-         outList.push_back(mVolumes[i]->mName.c_str());
-      }
-   }
-   
-   const char *getMountName(uint32_t idx)
-   {
-      if (idx < mPaths.size())
-         return mPaths[idx].c_str();
-      idx -= mPaths.size();
-      if (idx < mVolumes.size())
-         return mVolumes[idx]->mName.c_str();
-      return "NULL";
-   }
-};
 
 void ConsolePersistObject::initStatics()
 {
@@ -885,13 +357,173 @@ public:
    virtual bool isResourceLoaded() = 0;
 };
 
+class ShapeViewer : public GenericViewer
+{
+public:
+   std::vector<Dts3::Thread> mThreads;
+   
+   Dts3::Shape* mShape;
+   
+   std::vector<slm::mat4> mNodeTransforms; // Current transform list
+   std::vector<slm::quat> mActiveRotations; // non-gl xfms
+   std::vector<slm::vec4> mActiveTranslations; // non-gl xfms
+   std::vector<uint8_t> mNodeVisiblity;
+   //std::vector<RuntimeMeshInfo*> mRuntimeMeshInfos;
+   //std::vector<RuntimeObjectInfo*> mRuntimeObjectInfos;
+   
+   //std::vector<RuntimeDetailInfo> mRuntimeDetails;
+   //std::vector<uint32_t> mObjectRenderID;
+   
+   int32_t mDefaultMaterials;
+   int32_t mAlwaysNode;
+   int32_t mCurrentDetail;
+   
+   ShapeViewer(ResManager* res)
+   {
+      mShape = NULL;
+      mResourceManager = res;
+      initVB = false;
+   }
+   
+   ~ShapeViewer()
+   {
+      //for (RuntimeMeshInfo* itr : mRuntimeMeshInfos) { delete itr; }
+      //for (RuntimeObjectInfo* itr : mRuntimeObjectInfos) { delete itr; }
+      clearVertexBuffer();
+      clearTextures();
+      clearRender();
+   }
+   
+   void clear()
+   {
+      clearVertexBuffer();
+      clearTextures();
+   }
+   
+   void initRender()
+   {
+      mLightColor = slm::vec4(1,1,1,1);
+      mLightPos = slm::vec3(0,2, 2);
+      
+      // TODO
+   }
+   
+   void clearRender()
+   {
+      // TODO
+   }
+   
+   // Sequence Handling
+   
+   
+   uint32_t addThread()
+   {
+      return 0;
+   }
+   
+   void setThreadSequence(uint32_t idx, int32_t sequenceId)
+   {
+   }
+   
+   void removeThread(uint32_t idx)
+   {
+   }
+   
+   void advanceThreads(float dt)
+   {
+   }
+   
+   void animateNodes()
+   {
+   }
+   
+   // Loading
+   
+   void loadShape(Dts3::Shape& inShape)
+   {
+      clear();
+      
+      mShape = &inShape;
+      
+      // Setup default pose for nodes
+      animateNodes();
+   }
+   
+   void initVertexBuffer()
+   {
+      clearVertexBuffer();
+   }
+   
+   void clearVertexBuffer()
+   {
+      if (!initVB)
+         return;
+      
+      GFXLoadModelData(0, NULL, NULL, NULL, 0, 0, 0);
+      initVB = false;
+   }
+   
+   // Rendering
+   
+   void determineNodeVisibility()
+   {
+   }
+   
+   void selectDetail(float dist, int w, int h)
+   {
+   }
+   
+   void drawLine(slm::vec3 start, slm::vec3 end, slm::vec4 color, float width)
+   {
+      updateMVP();
+      GFXBeginLinePipelineState();
+      GFXDrawLine(start, end, color, width);
+   }
+   
+   void render()
+   {
+      determineNodeVisibility();
+   }
+   
+   void renderNodes(int32_t nodeIdx, slm::vec3 parentPos, int32_t highlightIdx)
+   {
+      if (nodeIdx < 0)
+         return;
+      
+#if 0
+      slm::mat4 firstXfm = slm::inverse(mNodeTransforms[0]);
+      slm::mat4 baseModel = mModelMatrix;
+      slm::mat4 y_up = slm::rotation_x(slm::radians(-90.0f));
+      
+      slm::mat4 slmMat = mNodeTransforms[nodeIdx];
+      
+      slmMat[3] = slm::vec4(0,0,0,1);
+      //slmMat = slm::transpose(slmMat);
+      slmMat[3] = mNodeTransforms[nodeIdx][3];
+      
+      assert(slmMat[3].w == 1);
+      
+      slm::vec4 pos = baseModel * y_up * firstXfm * slmMat * slm::vec4(0,0,0,1);
+      
+      drawLine(pos.xyz(), parentPos, nodeIdx == highlightIdx ? slm::vec4(0,1,0,1) : slm::vec4(1,0,0,1), 1);
+      
+      // Recurse
+      Shape::NodeChildInfo info = mShape->mNodeChildren[nodeIdx+1];
+      for (int32_t i=0; i<info.numChildren; i++)
+      {
+         renderNodes(mShape->mNodeChildIds[info.firstChild+i], pos.xyz(), highlightIdx);
+      }
+#endif
+   }
+};
+
 class ShapeViewerController : public ViewController
 {
 public:
-   //ShapeViewer mViewer;
+   ShapeViewer mViewer;
    SDL_Window* mWindow;
    float xRot, yRot, mDetailDist;
-   //Shape* mShape;
+   Dts3::Shape* mShape;
    int32_t mHighlightNodeIdx;
    
    std::vector<const char*> mSequenceList;
@@ -901,16 +533,16 @@ public:
    bool mRenderNodes;
    bool mManualThreads;
    
-   ShapeViewerController(SDL_Window* window, ResManager* mgr) /*:
-   mViewer(mgr)*/
+   ShapeViewerController(SDL_Window* window, ResManager* mgr) :
+   mViewer(mgr)
    {
       mViewPos = slm::vec3(0,0,0);
       mCamRot = slm::vec3(0,0,0);
-      //mViewer.initRender();
+      mViewer.initRender();
       mWindow = window;
       xRot = mDetailDist = 0;
       yRot = slm::radians(180.0f);
-      //mShape = NULL;
+      mShape = NULL;
       mHighlightNodeIdx = -1;
       mRemoveThreadId = -1;
       mRenderNodes = true;
@@ -919,16 +551,13 @@ public:
    
    ~ShapeViewerController()
    {
-      #if 0
       if (mShape)
          delete mShape;
-      #endif
    }
    
    bool isResourceLoaded()
    {
-      return false;
-      //return mShape != NULL;
+      return mShape != NULL;
    }
    
    void updateNextSequence()
@@ -944,41 +573,34 @@ public:
    
    void loadShape(const char *filename, int pathIdx=-1)
    {
-      #if 0
       MemRStream rStream(0, NULL);
       mViewer.clear();
       if (mShape)
          delete mShape;
       mShape = NULL;
       
-      if (mViewer.mResourceManager->openFile(filename, rStream, pathIdx))
+      ResourceInstance* inst = mViewer.mResourceManager->createResource(filename, pathIdx);
+      
+      if (inst)
       {
-         DarkstarPersistObject* obj = DarkstarPersistObject::createFromStream(rStream);
-         if (obj)
-         {
-            mShape = ((Shape*)obj);
-            mViewer.clear();
-            if (!mViewer.setPalette(mPaletteName.c_str()))
-            {
-               printf("Warning: cant load palette %s\n", mPaletteName.c_str());
-            }
-            mViewer.loadShape(*mShape);
-            
-            uint32_t thr = mViewer.addThread();
-            mViewer.setThreadSequence(thr, 0);
-            
-            mViewPos = slm::vec3(0, mViewer.mShape->mCenter.z, mViewer.mShape->mRadius);
-            
-            mSequenceList.resize(mShape->mSequences.size());
-            updateNextSequence();
-            
-            for (int i=0; i<mViewer.mShape->mSequences.size(); i++)
-            {
-               mSequenceList[i] = mShape->getName(mShape->mSequences[i].name);
-            }
-         }
+         Dts3::Shape* shape = (Dts3::Shape*)inst;
+         mShape = shape;
+         mViewer.clear();
+         mViewer.loadShape(*mShape);
+         
+         //uint32_t thr = mViewer.addThread();
+         //mViewer.setThreadSequence(thr, 0);
+         
+         mViewPos = slm::vec3(0);//slm::vec3(0, mViewer.mShape->mCenter.z, mViewer.mShape->mRadius);
+         
+         //mSequenceList.resize(mShape->mSequences.size());
+         //updateNextSequence();
+         
+         //for (int i=0; i<mViewer.mShape->mSequences.size(); i++)
+         //{
+         //   mSequenceList[i] = mShape->getName(mShape->mSequences[i].name);
+         //}
       }
-      #endif
    }
    
    void update(float dt)
@@ -1198,6 +820,14 @@ struct MainState
 static MainState gMainState;
 
 
+template<class T> static ResourceInstance* _createClass() { return new T(); }
+
+void ResManager::initStatics()
+{
+   registerCreateFunc(".dts", _createClass<Dts3::Shape>);
+}
+
+
 int main(int argc, const char * argv[])
 {
    SDL_Window* window = NULL;
@@ -1208,6 +838,7 @@ int main(int argc, const char * argv[])
    assert(sizeof(slm::vec4) == 16);
    
    ConsolePersistObject::initStatics();
+   ResManager::initStatics();
    
    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
       printf("Couldn't initialize SDL: %s\n", SDL_GetError());

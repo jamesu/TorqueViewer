@@ -755,7 +755,7 @@ class Thread
 };
 
 
-class Shape
+class Shape : public ResourceInstance
 {
    friend class IO;
 protected:
@@ -824,6 +824,8 @@ public:
    Sequence* getSequence(const std::string_view& name);
    
    bool checkSkip(int meshNumber, int currentObject, int currentDecal, int skipDetailLevel);
+   
+   virtual bool read(MemRStream& stream);
 };
 
 }

@@ -24,11 +24,11 @@ struct IO
       shape->mSequences.resize(numSequences);
       for (Sequence& seq : shape->mSequences)
       {
-         IO::readSequence(seq, ds);
+         seq.read(*ds.getBaseStream(), ds.getVersion());
       }
       
       // Reading material list
-      IO::readMaterials(shape->mMaterials, ds);
+      shape->mMaterials.read(*ds.getBaseStream());
       
       // Reading various counts
       uint32_t numNodes = 0;
@@ -90,8 +90,8 @@ struct IO
       // Reading bounds
       ds.read(shape->mRadius);
       ds.read(shape->mTubeRadius);
-      readPoint3F(shape->mCenter, ds);
-      readBox(shape->mBounds, ds);
+      readPoint3F(ds, shape->mCenter);
+      readBox(ds, shape->mBounds);
       
       ds.readCheck();
       
@@ -99,7 +99,7 @@ struct IO
       shape->mNodes.resize(numNodes);
       for (Node& n : shape->mNodes)
       {
-         readNode(n, ds);
+         readNode(ds, n);
       }
       
       ds.readCheck();
@@ -108,7 +108,7 @@ struct IO
       shape->mObjects.resize(numObjects);
       for (Object& n : shape->mObjects)
       {
-         readObject(n, ds);
+         readObject(ds, n);
       }
       
       ds.readCheck();
@@ -117,7 +117,7 @@ struct IO
       shape->mDecals.resize(numDecals);
       for (Decal& n : shape->mDecals)
       {
-         readDecal(n, ds);
+         readDecal(ds, n);
       }
       
       ds.readCheck();
@@ -126,7 +126,7 @@ struct IO
       shape->mIflMaterials.resize(numIflMaterials);
       for (IflMaterial& n : shape->mIflMaterials)
       {
-         readIflMaterial(n, ds);
+         readIflMaterial(ds, n);
       }
       
       ds.readCheck();
@@ -163,8 +163,8 @@ struct IO
       shape->mDefaultTranslations.resize(numNodes);
       for (uint32_t i = 0; i < numNodes; ++i)
       {
-         IO::readQuat16(shape->mDefaultRotations[i], ds);
-         IO::readPoint3F(shape->mDefaultTranslations[i], ds);
+         IO::readQuat16(ds, shape->mDefaultRotations[i]);
+         IO::readPoint3F(ds, shape->mDefaultTranslations[i]);
       }
       
       // Reading node sequence data
@@ -172,11 +172,11 @@ struct IO
       shape->mNodeRotations.resize(numNodeRots);
       for (slm::vec3& point : shape->mNodeTranslations)
       {
-         IO::readPoint3F(point, ds);
+         IO::readPoint3F(ds, point);
       }
       for (Quat16& quat : shape->mNodeRotations)
       {
-         IO::readQuat16(quat, ds);
+         IO::readQuat16(ds, quat);
       }
       
       ds.readCheck();
@@ -197,8 +197,8 @@ struct IO
       }
       for (uint32_t i = 0; i < numNodeArbitraryScales; ++i)
       {
-         IO::readPoint3F(shape->mNodeArbitraryScaleFactors[i], ds);
-         IO::readQuat16(shape->mNodeArbitraryScaleRotations[i], ds);
+         IO::readPoint3F(ds, shape->mNodeArbitraryScaleFactors[i]);
+         IO::readQuat16(ds, shape->mNodeArbitraryScaleRotations[i]);
       }
       
       ds.readCheck();
@@ -208,8 +208,8 @@ struct IO
       shape->mGroundRotations.resize(numGroundFrames);
       for (int i = 0; i < numGroundFrames; ++i)
       {
-         IO::readPoint3F(shape->mGroundTranslations[i], ds);
-         IO::readQuat16(shape->mGroundRotations[i], ds);
+         IO::readPoint3F(ds, shape->mGroundTranslations[i]);
+         IO::readQuat16(ds, shape->mGroundRotations[i]);
       }
       
       ds.readCheck();
@@ -218,7 +218,7 @@ struct IO
       shape->mObjectStates.resize(numObjectStates);
       for (ObjectState& n : shape->mObjectStates)
       {
-         readObjectState(n, ds);
+         readObjectState(ds, n);
       }
       
       ds.readCheck();
@@ -227,7 +227,7 @@ struct IO
       shape->mDecalStates.resize(numDecalStates);
       for (DecalState& n : shape->mDecalStates)
       {
-         readDecalState(n, ds);
+         readDecalState(ds, n);
       }
       
       ds.readCheck();
@@ -236,7 +236,7 @@ struct IO
       shape->mTriggers.resize(numTriggers);
       for (Trigger& n : shape->mTriggers)
       {
-         readTrigger(n, ds);
+         readTrigger(ds, n);
       }
       
       ds.readCheck();
@@ -245,7 +245,7 @@ struct IO
       shape->mDetailLevels.resize(numDetails);
       for (DetailLevel& n : shape->mDetailLevels)
       {
-         readDetailLevel(n, ds);
+         readDetailLevel(ds, n);
       }
       
       ds.readCheck();
@@ -267,7 +267,9 @@ struct IO
       // Reading names
       for (int i = 0; i < numNames; ++i)
       {
-         shape->mNameTable.addString(ds.readString());
+         std::string str;
+         readString(ds, str);
+         shape->mNameTable.addString(str);
       }
       
       ds.readCheck();
@@ -283,6 +285,24 @@ struct IO
    }
    
    template<typename T> static bool writeShape(Shape* shape, T& ds, uint32_t version)
+   {
+      return false;
+   }
+   
+   template<typename T> static bool readString(T& ds, std::string& str)
+   {
+      uint8_t len = 0;
+      ds.read(len);
+      
+      char buffer[257];
+      ds.read8(len, buffer);
+      buffer[len] = 0;
+      
+      str = buffer;
+      return true;
+   }
+   
+   template<typename T> static bool writeString(T& ds, const std::string& str)
    {
       return false;
    }
@@ -423,6 +443,27 @@ struct IO
    }
    
    template<typename T> static bool writeObjectState(T& ds, const ObjectState& box)
+   {
+      return false;
+   }
+   
+   template<typename T> static bool readIflMaterial(T& ds, IflMaterial& box)
+   {
+      return false;
+   }
+   
+   template<typename T> static bool writeIflMaterial(T& ds, const IflMaterial& box)
+   {
+      return false;
+   }
+   
+   
+   template<typename T> static bool readDecal(T& ds, Decal& box)
+   {
+      return false;
+   }
+   
+   template<typename T> static bool writeDecal(T& ds, const Decal& box)
    {
       return false;
    }
@@ -632,8 +673,10 @@ struct IO
          }
          else
          {
-            for (int i = 0; i < 3; ++i) {
-               ds.reads32();
+            for (int i = 0; i < 3; ++i) 
+            {
+               uint32_t val = 0;
+               ds.read(val);
             }
          }
          
@@ -724,12 +767,17 @@ struct IO
 
 struct BasicStream
 {
-   MemRStream stream;
+   MemRStream* baseStream;
    uint16_t version;
    
    inline uint32_t getVersion() const { return version; }
    
-   void writeHeader(MemRStream& destStream, uint16_t dtsVersion)
+   inline MemRStream* getBaseStream()
+   {
+      return baseStream;
+   }
+   
+   void beginWriteStream(MemRStream& destStream, uint16_t dtsVersion)
    {
       uint32_t hdr[4];
       hdr[0] = 861099076;
@@ -737,6 +785,7 @@ struct BasicStream
       hdr[2] = 0;
       hdr[3] = 0;
       version = dtsVersion;
+      baseStream = &destStream;
       
       destStream.write(sizeof(hdr), hdr);
    }
@@ -746,6 +795,7 @@ struct BasicStream
       uint32_t hdr[4] = {};
       srcStream.read(sizeof(hdr), hdr);
       version = hdr[1] & 0xFFFF;
+      baseStream = &srcStream;
    }
    
    bool readCheck()
@@ -760,22 +810,37 @@ struct BasicStream
 
 struct SplitStream
 {
-   static constexpr int32_t EXPORTER_VERSION = 1;
+   enum
+   {
+      EXPORTER_VERSION=1
+   };
    
    MemRStream buffer32;
    MemRStream buffer16;
    MemRStream buffer8;
+   MemRStream* baseStream;
    
    uint32_t checkCount;
    uint16_t dtsVersion;
    
-   SplitStream() : dtsVersion(0), checkCount(0)
+   SplitStream() : dtsVersion(0), checkCount(0), baseStream(NULL)
    {
    }
    
-   void beginWriteStream(uint16_t writeVersion)
+   inline uint16_t getVersion() const
+   {
+      return dtsVersion;
+   }
+   
+   inline MemRStream* getBaseStream()
+   {
+      return baseStream;
+   }
+   
+   void beginWriteStream(MemRStream& stream, uint16_t writeVersion)
    {
       dtsVersion = writeVersion;
+      baseStream = &stream;
    }
    
    void flushToStream(MemRStream& destStream)
@@ -818,6 +883,7 @@ struct SplitStream
       uint32_t hdr[4];
       sourceStream.read(4 * sizeof(int32_t), hdr);
       dtsVersion = hdr[1] & 0xFFFF;
+      baseStream = &sourceStream;
       
       int32_t ver = hdr[0];
       int32_t totalSize = hdr[1];
