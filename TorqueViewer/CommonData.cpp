@@ -297,3 +297,265 @@ bool Bitmap::read(MemRStream& mem)
    
    return true;
 }
+
+//
+
+
+MaterialList::MaterialList() : 
+   mTextureType(0),
+   mClampToEdge(false),
+   mNamesTransformed(false),
+   mVariant(VARIANT_NORMAL)
+{
+}
+
+MaterialList::MaterialList(uint32_t materialCount, const char** materialNames) :
+mTextureType(0),
+mClampToEdge(false),
+mNamesTransformed(false),
+mVariant(VARIANT_NORMAL)
+{  
+   mMaterials.reserve(materialCount);
+   
+   for (uint32_t i=0; i<materialCount; i++)
+   {
+      push_back(materialNames[i]);
+   }
+}
+
+MaterialList::MaterialList(const MaterialList* other) :
+mTextureType(other->mTextureType),
+mClampToEdge(other->mClampToEdge),
+mNamesTransformed(other->mNamesTransformed),
+mVariant(other->mVariant)
+{
+   mMaterials = other->mMaterials;
+}
+
+MaterialList::~MaterialList()
+{
+   free();
+}
+
+void MaterialList::load()
+{
+   loadFromPath(NULL);
+}
+
+void MaterialList::loadMaterial(uint32_t index, const char* path)
+{
+   // TODO
+}
+
+bool MaterialList::load(uint32_t type, const char* path, bool clampToEdge)
+{
+   mTextureType = type;
+   mClampToEdge = clampToEdge;
+   return loadFromPath(path);
+}
+
+void MaterialList::push_back(const char* name, Material* props)
+{
+   Material mat = {};
+   if (props)
+   {
+      mat = *props;
+   }
+   mat.name = name;
+   mMaterials.push_back(mat);
+}
+
+bool MaterialList::isBlank(uint32_t index)
+{
+   if (index >= mMaterials.size())
+      return true;
+   return mMaterials[index].name[0] == '\0';
+}
+
+void MaterialList::free()
+{
+   mMaterials.clear();
+}
+
+bool MaterialList::read(MemRStream& s)
+{
+   free();
+
+   uint8_t versionNum = 0;
+   uint32_t numMaterials = 0;
+   char buffer[1024];
+   buffer[0] = '\0';
+   
+   s.read(versionNum);
+   
+   if (versionNum != BINARY_FILE_VERSION)
+   {
+      if (mVariant == MaterialList::VARIANT_NORMAL &&
+          isalnum(versionNum))
+         return parseFromStream(s);
+      else
+         return false;
+   }
+
+   if (mVariant == VARIANT_NORMAL)
+   {
+      s.read(numMaterials);
+      mMaterials.reserve(numMaterials);
+      for (uint32_t i=0; i<numMaterials; i++)
+      {
+         std::string tmp;
+         s.readS8String(tmp);
+         
+         // paths need to be stripped off even in binary streams
+         char* toolPath = stripToolPath(buffer);
+         
+         push_back(toolPath);
+      }
+   }
+   else if (mVariant == VARIANT_TS)
+   {
+      s.read(numMaterials);
+      mMaterials.reserve(numMaterials);
+
+      for (int32_t i = 0; i < numMaterials; i++)
+      {
+         uint8_t nameLen;
+         s.read(nameLen);
+         
+         std::string name(nameLen, '\0');
+         s.read(nameLen, &name[0]);
+         
+         mMaterials.push_back(Material(name.c_str()));
+      }
+      
+      uint32_t tmp = 0;
+      
+      for (auto& mat : mMaterials)
+      {
+         s.read(tmp);
+         mat.tsProps.flags = tmp;
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.read(tmp);
+         mat.tsProps.reflectanceMap = tmp;
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.read(tmp);
+         mat.tsProps.bumpMap = tmp;
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.read(tmp);
+         mat.tsProps.detailMap = tmp;
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.read(mat.tsProps.detailScale);
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.read(mat.tsProps.reflectionAmount);
+      }
+   }
+   else
+   {
+      return false;
+   }
+   
+   return true;
+}
+
+bool MaterialList::write(MemRStream& s)
+{
+   if (mVariant == VARIANT_NORMAL)
+   {
+      s.write((uint8_t)BINARY_FILE_VERSION);
+      s.write((uint32_t)mMaterials.size());
+      for (Material& mat : mMaterials)
+      {
+         s.writeS8String(mat.name);
+      }
+   }
+   else if (mVariant == VARIANT_TS)
+   {
+      s.write((uint8_t)BINARY_FILE_VERSION);
+      uint32_t size = static_cast<uint32_t>(mMaterials.size());
+      s.write(size);
+      
+      for (const auto& mat : mMaterials)
+      {
+         s.writeS8String(mat.name);
+      }
+      
+      for (auto& mat : mMaterials)
+      {
+         s.write(mat.tsProps.flags);
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.write(mat.tsProps.reflectanceMap);
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.write(mat.tsProps.bumpMap);
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.write(mat.tsProps.detailMap);
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.write(mat.tsProps.detailScale);
+      }
+      for (auto& mat : mMaterials)
+      {
+         s.write(mat.tsProps.reflectionAmount);
+      }
+   }
+   else
+   {
+      return false;
+   }
+   
+   return true;
+}
+
+bool MaterialList::parseFromStream(MemRStream& s)
+{
+   char buffer[1024];
+   buffer[0] = '\0';
+   s.setPosition(0);
+   
+   do
+   {
+      s.readLine((uint8_t*)buffer, sizeof(buffer));
+      if (!buffer[0])
+         break;
+      
+      char* toolPath = stripToolPath(buffer);
+      push_back(toolPath);
+      
+      if (s.isEOF())
+         return true;
+      
+   } while (!s.isEOF());
+   
+   return false;
+}
+
+bool MaterialList::loadFromPath(const char* path)
+{
+   for (uint32_t i=0; i<mMaterials.size(); i++)
+   {
+      loadMaterial(i, path);
+      
+      uint32_t th = mMaterials[i].texID;
+      const char* name = mMaterials[i].name.c_str();
+      if (name && *name && th > 0)
+         return false;
+   }
+   
+   return true;
+}

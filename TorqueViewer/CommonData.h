@@ -28,6 +28,8 @@
 #include <slm/slmath.h>
 #include <string>
 
+#define BIT(x) (((uint32_t)1)<<(x))
+
 struct _LineVert
 {
    slm::vec3 pos;
@@ -97,6 +99,7 @@ public:
    
    bool mOwnPtr;
    
+   MemRStream() : mPos(0), mSize(0), mPtr(NULL), mOwnPtr(false) {;}
    MemRStream(uint64_t sz, void* ptr, bool ownPtr=false) : mPos(0), mSize(sz), mPtr((uint8_t*)ptr), mOwnPtr(ownPtr) {;}
    MemRStream(MemRStream &&other)
    {
@@ -119,14 +122,23 @@ public:
       mPtr = other.mPtr;
       mPos = other.mPos;
       mSize = other.mSize;
+      mOwnPtr = other.mOwnPtr ? true : false;
       other.mOwnPtr = false;
-      mOwnPtr = true;
       return *this;
    }
    ~MemRStream()
    {
       if(mOwnPtr)
          free(mPtr);
+   }
+
+   void setOffsetView(MemRStream &other, std::size_t offset, std::size_t size)
+   {
+      mPtr = other.mPtr + other.mPos + offset;
+      mPos = 0;
+      mSize = size;
+      mOwnPtr = false;
+      mOwnPtr = true;
    }
    
    // For array types
@@ -163,6 +175,27 @@ public:
       mPos += size;
       
       return true;
+   }
+   
+   inline bool readS8String(std::string &outS)
+   {
+      uint8_t size;
+      if (!read(size)) return false;
+      
+      int real_size = (size + 1) & (~1); // dword padded
+      char *str = new char[real_size+1];
+      if (read(real_size, str))
+      {
+         str[real_size] = '\0';
+         outS = str;
+         delete[] str;
+         return true;
+      }
+      else
+      {
+         delete[] str;
+         return false;
+      }
    }
    
    inline bool readSString(std::string &outS)
@@ -206,10 +239,28 @@ public:
       }
    }
    
+   inline bool readLine(uint8_t* buf, std::size_t max_size)
+   {
+      uint8_t lastChar = 0;
+      read(lastChar);
+      std::size_t sz = 0;
+      buf[0] = '\0';
+      
+      while (lastChar != 0 && lastChar != '\n' && (sz+1) < max_size)
+      {
+         read(lastChar);
+         if (lastChar != '\r')
+            buf[sz++] = lastChar;
+      }
+      
+      buf[sz] = '\0';
+      return true;
+   }
+   
    // WRITE
    
    // For array types
-   template<class T, int N> inline bool write( T (&value)[N] )
+   template<class T, int N> inline bool write( const T (&value)[N] )
    {
       if (mPos >= mSize || mPos+(sizeof(T)*N) > mSize)
          return false;
@@ -221,7 +272,7 @@ public:
    }
    
    // For normal scalar types
-   template<typename T> inline bool write(T &value)
+   template<typename T> inline bool write(const T& value)
    {
       T* tptr = (T*)(mPtr+mPos);
       if (mPos >= mSize || mPos+sizeof(T) > mSize)
@@ -233,7 +284,7 @@ public:
       return true;
    }
    
-   inline bool write(uint64_t size, void* data)
+   inline bool write(uint64_t size, const void* data)
    {
       if (mPos >= mSize || mPos+size > mSize)
          return false;
@@ -244,23 +295,32 @@ public:
       return true;
    }
    
-   inline bool writeSString(std::string &outS)
+   inline bool writeS8String(const std::string &outS)
    {
-      uint16_t size = (uint16_t)outS.size();
+      uint8_t size = (uint8_t)outS.size();
       if (!write(size)) return false;
       
-      int real_size = (size + 1) & (~1); // dword padded
-      char *str = new char[real_size+1];
-      if (read(real_size, str))
+      if (write(size, &outS[0]))
       {
-         str[real_size] = '\0';
-         outS = str;
-         delete[] str;
          return true;
       }
       else
       {
-         delete[] str;
+         return false;
+      }
+   }
+   
+   inline bool writeSString(const std::string &outS)
+   {
+      uint16_t size = (uint16_t)outS.size();
+      if (!write(size)) return false;
+      
+      if (write(size, &outS[0]))
+      {
+         return true;
+      }
+      else
+      {
          return false;
       }
    }
@@ -275,6 +335,7 @@ public:
    inline uint64_t getPosition() { return mPos; }
    
    inline bool isEOF() { return mPos >= mSize; }
+
 };
 
 class IFFBlock
@@ -521,6 +582,436 @@ inline void copyMipRGBA(uint32_t width, uint32_t height, uint32_t pad_width, Pal
       }
    }
 }
+
+
+enum
+{
+    IntegerSetBits = 64*32
+};
+
+template<const std::size_t BitSize> class BitSet
+{
+public:
+    enum
+    {
+        WordBits = sizeof(std::size_t) * 8,
+        WordSize = sizeof(std::size_t),
+        TotalWords = (BitSize+sizeof(std::size_t)-1) / sizeof(std::size_t)
+    };
+
+public:
+    std::size_t mWords[TotalWords];
+
+public:
+
+    BitSet()
+    {
+        memset(mWords, 0, sizeof(mWords));
+    }
+
+    inline bool operator==(const BitSet& other) const
+    {
+        return memcmp(this, other, sizeof(mWords)) == 0;
+    }
+
+    inline bool operator!=(const BitSet& other) const
+    {
+        return memcmp(this, other, sizeof(mWords)) != 0;
+    }
+
+    inline bool test(std::size_t pos) const
+    {
+        std::size_t offset = pos / WordSize;
+        return (mWords[offset] & BIT(pos % WordSize)) != 0;
+    }
+
+    bool all()
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            if (mWords[i] != SIZE_MAX)
+                return false;
+        }
+
+        return true;
+    }
+
+    bool any()
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            if (mWords[i] != 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    bool none()
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            if (mWords[i] != 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    std::size_t count()
+    {
+        std::size_t total = 0;
+
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            total += std::popcount(mWords[i]);
+        }
+
+        return total;
+    }
+
+    inline std::size_t size()
+    {
+        return TotalWords * WordBits;
+    }
+
+    inline std::size_t setWordSize() const
+    {
+      std::size_t lastSize = 0;
+      for (std::size_t i=0; i<TotalWords; i++)
+      {
+         if (mWords[i] != 0)
+            lastSize = i;
+      }
+      return lastSize;
+    }
+
+    inline void set()
+    {
+        memset(mWords, 0xFF, sizeof(mWords));
+    }
+
+    inline void set(std::size_t pos, bool value)
+    {
+        std::size_t offset = pos / WordSize;
+        mWords[offset] |= BIT(pos % WordSize);
+    }
+
+    inline void diff(const BitSet<BitSize>& other)
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            mWords[i] = (mWords[i] | other.mWords[i]) &
+                            ~(mWords[i] & other.mWords[i]);
+        }
+    }
+
+    inline void sub(const BitSet<BitSize>& other)
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            mWords[i] &= ~other.mWords[i];
+        }
+    }
+
+    void reset()
+    {
+        memset(mWords, 0, sizeof(mWords));
+    }
+
+    inline void flip()
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            mWords[i] = ~mWords[i];
+        }
+    }
+
+    inline void flip(std::size_t pos, bool value)
+    {
+        std::size_t offset = pos / WordSize;
+        mWords[offset] &= ~BIT(pos % WordSize);
+    }
+
+    BitSet<BitSize>& operator&=(const BitSet<BitSize>& other)
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            mWords[i] &= other.mWords[i];
+        }
+        return *this;
+    }
+
+    BitSet<BitSize>& operator|=(const BitSet<BitSize>& other)
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            mWords[i] |= other.mWords[i];
+        }
+        return *this;
+    }
+
+    BitSet<BitSize>& operator^=(const BitSet<BitSize>& other)
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            mWords[i] ^= other.mWords[i];
+        }
+        return *this;
+    }
+
+    BitSet<BitSize>& operator~()
+    {
+        for (std::size_t i=0; i<TotalWords; i++)
+        {
+            mWords[i] = ~mWords[i];
+        }
+        return *this;
+    }
+
+    std::ptrdiff_t findFirst() const
+    {
+      for (std::size_t i = 0; i < TotalWords; i++)
+      {
+         if (mWords[i] != 0)
+         {
+            return (std::ptrdiff_t)((i * WordBits) + std::countr_zero(mWords[i])); 
+         }
+      }
+      return -1;
+    }
+
+    std::ptrdiff_t findLast() const
+    {
+      for (std::size_t i = TotalWords-1; i >=0; i--)
+      {
+         if (mWords[i] != 0)
+         {
+            return (std::ptrdiff_t)((i * WordBits) + ((WordBits-1) - std::countl_zero(mWords[i]))); 
+         }
+      }
+      return -1;
+    }
+
+    std::ptrdiff_t findNext(std::ptrdiff_t last) const
+    {
+      std::size_t startWord = last < 0 ? 0 : (last / WordBits);
+      std::size_t wordShift = last < 0 ? 0 : last % WordBits;
+
+      for (std::size_t i = startWord; i < TotalWords; i++)
+      {
+         std::size_t val = mWords[i];
+         val >>= wordShift;
+         if (val != 0)
+         {
+            return (std::ptrdiff_t)((i * WordBits) + wordShift + std::countr_zero(val)); 
+         }
+         wordShift = 0;
+      }
+      return -1;
+    }
+};
+
+template<const std::size_t BS> BitSet<BS>& operator&(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
+{
+    BitSet<BS> out = lhs;
+    for (std::size_t i=0; i<BitSet<BS>::TotalWords; i++)
+    {
+        out.mWords[i] &= rhs.mWords[i];
+    }
+    return out;
+}
+
+template<const std::size_t BS> BitSet<BS>& operator|(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
+{
+    BitSet<BS> out = lhs;
+    for (std::size_t i=0; i<BitSet<BS>::TotalWords; i++)
+    {
+        out.mWords[i] |= rhs.mWords[i];
+    }
+    return out;
+}
+
+template<const std::size_t BS> BitSet<BS>& operator^(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
+{
+    BitSet<BS> out = lhs;
+    for (std::size_t i=0; i<BitSet<BS>::TotalWords; i++)
+    {
+        out.mWords[i] ^= rhs.mWords[i];
+    }
+    return out;
+}
+
+
+typedef BitSet<IntegerSetBits> IntegerSet;
+
+template<typename T> inline void readIntegerSet(T &fs, IntegerSet &set)
+{
+   uint32_t numInts = 0;
+   uint32_t numWords = 0;
+   set.reset();
+   fs.read(numInts);
+   fs.read(numWords);
+   fs.read(IntegerSet::WordSize * numWords, &set.mWords[0]);
+}
+
+template<typename T> inline void writeIntegerSet(T &fs, const IntegerSet &set)
+{
+   uint32_t numInts = 0;
+   uint32_t numWords = (uint32_t)set.setWordSize();
+   
+   fs.write(numInts);
+   fs.write(numWords);
+   fs.write(IntegerSet::WordSize * numWords, &set.mWords[0]);
+}
+
+struct Box
+{
+   slm::vec3 min;
+   slm::vec3 max;
+};
+
+
+class ResourceInstance
+{
+public:
+};
+
+class MaterialList : public ResourceInstance
+{
+public:
+
+   enum
+   {
+      BINARY_FILE_VERSION = 1
+   };
+
+   enum Variant : uint8_t
+   {
+      VARIANT_NORMAL=0,
+      VARIANT_TS=1
+   };
+
+   // NOTE: torque stores these in TSMaterialList, but to keep 
+   // things simple we combine everything together.
+   struct TSProperties
+   {
+      uint16_t flags;
+      int16_t reflectanceMap;
+      int16_t bumpMap; 
+      int16_t detailMap;
+      // 4
+      float detailScale;
+      // 8
+      float reflectionAmount;
+      // 12
+   };
+
+   struct Material
+   {
+      std::string name;
+      // ~8
+
+      uint32_t texID;
+      uint32_t texGroupID;
+      // +8
+
+      union
+      {
+         TSProperties tsProps; // 12
+      };
+
+      // ~28
+
+      Material() : texID(0), texGroupID(0)
+      {
+         tsProps = {};
+      }
+
+      Material(const char* _name) : texID(0), texGroupID(0)
+      {
+         name = _name;
+         tsProps = {};
+      }
+   };
+
+   bool mClampToEdge;
+   bool mNamesTransformed;
+   Variant mVariant;
+
+   uint32_t mTextureType;
+   std::vector<Material> mMaterials;
+
+   typedef std::vector<Material>::iterator iterator;
+   typedef std::vector<Material>::value_type value;
+
+public:
+
+   MaterialList();
+   explicit MaterialList(uint32_t materialCount, const char** materialNames);
+   explicit MaterialList(const MaterialList*);
+   ~MaterialList();
+   
+   void load();
+   virtual void loadMaterial(uint32_t index, const char* path = NULL);
+   virtual bool load(uint32_t type, const char* path = NULL, bool clampToEdge = false);
+   
+   void push_back(const char* name, Material* props = NULL);
+   bool isBlank(uint32_t index);
+
+   inline uint32_t getMaterialCount() const;
+   inline uint32_t size() const;
+   
+   inline value& operator[](uint32_t index) { return mMaterials[index]; }
+   
+   virtual void free();
+
+   bool read(MemRStream& s);
+   bool write(MemRStream& s);
+   
+   bool parseFromStream(MemRStream& s);
+   bool loadFromPath(const char* path);
+   
+   
+   static inline char* stripToolPath(char* name);
+};
+
+
+inline uint32_t MaterialList::getMaterialCount() const
+{
+   return mMaterials.size();
+}
+
+inline uint32_t MaterialList::size() const
+{
+   return mMaterials.size();
+}
+
+inline char* MaterialList::stripToolPath(char* name)
+{
+   char* s1 = NULL;
+   char* s2 = NULL;
+   
+   s1 = strrchr(name, '/');
+   if (s1)
+   {
+      s2 = strrchr(s1, '\\');
+      if (s2)
+      {
+         return s2+1;
+      }
+      else
+      {
+         return s1+1;
+      }
+   }
+   else
+   {
+      return name;
+   }
+   
+}
+
 
 
 

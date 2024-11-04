@@ -671,51 +671,6 @@ public:
    }
 };
 
-class Material
-{
-public:
-   
-   
-   Material()
-   {
-      memset(this, '\0', sizeof(Material));
-   }
-   
-   bool read(MemRStream &mem, int version)
-   {
-      return true;
-   }
-};
-
-class MaterialList
-{
-public:
-   
-   uint32_t mNumDetails;
-   std::vector<Material> mMaterials;
-   
-   MaterialList()
-   {
-   }
-   
-   virtual ~MaterialList()
-   {
-   }
-   
-   bool read(MemRStream &stream, int version)
-   {
-      uint32_t sz;
-      stream.read(mNumDetails);
-      stream.read(sz);
-      mMaterials.resize(sz * mNumDetails);
-      for (size_t i=0, sz=mMaterials.size(); i<sz; i++)
-      {
-         mMaterials[i].read(stream, version);
-      }
-      return true;
-   }
-};
-
 // 16-bit quat type (same as torque)
 struct Quat16
 {
@@ -823,7 +778,7 @@ public:
          mActiveMaterials.resize(mMaterialList->mMaterials.size());
          for (int i=0; i<mMaterialList->mMaterials.size(); i++)
          {
-            Material& mat = mMaterialList->mMaterials[i];
+            MaterialList::Material& mat = mMaterialList->mMaterials[i];
             ActiveMaterial& amat = mActiveMaterials[i];
             // TOFIX loadTexture((const char*)mat.mFilename, amat.tex);
          }
@@ -840,9 +795,9 @@ public:
       
       int count = 0;
       
-      for (Material& mat : mMaterialList->mMaterials)
+      for (MaterialList::Material& mat : mMaterialList->mMaterials)
       {
-         std::string fname = "";// TOFIX(const char*)mat.mFilename;
+         std::string fname = mat.name;
          
          // Find in resources
          MemRStream mem(0, NULL);
