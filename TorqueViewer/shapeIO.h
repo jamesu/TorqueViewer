@@ -19,7 +19,7 @@ struct IO
    {
       // Reading sequences
       uint32_t numSequences = 0;
-      ds.read(numSequences);
+      ds.getBaseStream()->read(numSequences);
       
       shape->mSequences.resize(numSequences);
       for (Sequence& seq : shape->mSequences)
@@ -28,58 +28,71 @@ struct IO
       }
       
       // Reading material list
+      shape->mMaterials.mVariant = MaterialList::VARIANT_TS;
       shape->mMaterials.read(*ds.getBaseStream());
       
       // Reading various counts
       uint32_t numNodes = 0;
-      ds.read(numNodes);
-      
       uint32_t numObjects = 0;
-      ds.read(numObjects);
-      
       uint32_t numDecals = 0;
+      uint32_t numSubShapes = 0;
+      uint32_t numIflMaterials = 0;
+      uint32_t numNodeRots = 0;
+      uint32_t numNodeTrans = 0;
+      uint32_t numNodeUniformScales = 0;
+      uint32_t numNodeAlignedScales = 0;
+      uint32_t numNodeArbitraryScales = 0;
+      uint32_t numGroundFrames = 0;
+      uint32_t numObjectStates = 0;
+      uint32_t numDecalStates = 0;
+      uint32_t numTriggers = 0;
+      uint32_t numDetails = 0;
+      uint32_t numMeshes = 0;
+      uint32_t numNames = 0;
+      uint32_t numSkins = 0;
+      
+      
+      ds.read(numNodes);
+      ds.read(numObjects);
       ds.read(numDecals);
       
-      uint32_t numSubShapes = 0;
       ds.read(numSubShapes);
       
-      uint32_t numIflMaterials = 0;
       ds.read(numIflMaterials);
       
-      uint32_t numNodeRots = 0;
-      ds.read(numNodeRots);
+      if (ds.getVersion() >= 22)
+      {
+         ds.read(numNodeRots);
+         ds.read(numNodeTrans);
+         ds.read(numNodeUniformScales);
+         ds.read(numNodeAlignedScales);
+         ds.read(numNodeArbitraryScales);
+      }
+      else
+      {
+         // node counts are different
+         ds.read(sz);
+         numNodeRots = numNodeTrans = sz - numNodes;
+      }
       
-      uint32_t numNodeTrans = 0;
-      ds.read(numNodeTrans);
+      if (ds.getVersion() > 23)
+      {
+         ds.read(numGroundFrames); // < 23 has no ground frames
+      }
       
-      uint32_t numNodeUniformScales = 0;
-      ds.read(numNodeUniformScales);
-      
-      uint32_t numNodeAlignedScales = 0;
-      ds.read(numNodeAlignedScales);
-      
-      uint32_t numNodeArbitraryScales = 0;
-      ds.read(numNodeArbitraryScales);
-      
-      uint32_t numGroundFrames = 0;
-      ds.read(numGroundFrames);
-      
-      uint32_t numObjectStates = 0;
       ds.read(numObjectStates);
       
-      uint32_t numDecalStates = 0;
       ds.read(numDecalStates);
       
-      uint32_t numTriggers = 0;
       ds.read(numTriggers);
       
-      uint32_t numDetails = 0;
       ds.read(numDetails);
       
-      uint32_t numMeshes = 0;
       ds.read(numMeshes);
-      
-      uint32_t numNames = 0;
+      if (ds.getVersion() < 23)
+      {
+         ds.read(numSkins); // skins arranged differently <23
+      }
       ds.read(numNames);
       
       ds.read(shape->mSmallestVisibleSize); // Not a float
@@ -158,6 +171,19 @@ struct IO
       
       ds.readCheck();
       
+      for (SubShape& s : shape->mSubshapes)
+      {
+         ds.read(s.firstTranslucent);
+      }
+      
+      // Mesh index list for old shapes
+      std::vector<uint32_t> meshIndexList;
+      if (ds.getVersion() < 16)
+      {
+         ds.read(sz);
+         ds.read32(sz, &meshIndexList[0]);
+      }
+      
       // Reading default translations and rotations
       shape->mDefaultRotations.resize(numNodes);
       shape->mDefaultTranslations.resize(numNodes);
@@ -187,18 +213,21 @@ struct IO
       shape->mNodeArbitraryScaleFactors.resize(numNodeArbitraryScales);
       shape->mNodeArbitraryScaleRotations.resize(numNodeArbitraryScales);
       
-      for (float& scale : shape->mNodeUniformScales)
+      if (ds.getVersion() > 21)
       {
-         ds.read(scale);
-      }
-      for (slm::vec3& scale : shape->mNodeAlignedScales)
-      {
-         ds.read(scale);
-      }
-      for (uint32_t i = 0; i < numNodeArbitraryScales; ++i)
-      {
-         IO::readPoint3F(ds, shape->mNodeArbitraryScaleFactors[i]);
-         IO::readQuat16(ds, shape->mNodeArbitraryScaleRotations[i]);
+         for (float& scale : shape->mNodeUniformScales)
+         {
+            ds.read(scale);
+         }
+         for (slm::vec3& scale : shape->mNodeAlignedScales)
+         {
+            ds.read(scale);
+         }
+         for (uint32_t i = 0; i < numNodeArbitraryScales; ++i)
+         {
+            IO::readPoint3F(ds, shape->mNodeArbitraryScaleFactors[i]);
+            IO::readQuat16(ds, shape->mNodeArbitraryScaleRotations[i]);
+         }
       }
       
       ds.readCheck();
@@ -251,28 +280,42 @@ struct IO
       ds.readCheck();
       
       // Reading meshes
-      shape->mMeshes.resize(numMeshes);
-      for (Mesh& m : shape->mMeshes)
+      if (ds.getVersion() > 15)
       {
-         ds.read(m.mType);
-         int val = readMesh(&m, shape, ds);
-         if (val != 1 && m.mType != 4)
+         shape->mMeshes.resize(numMeshes);
+         for (Mesh& m : shape->mMeshes)
          {
-            return false;
+            ds.read(m.mType);
+            int val = readMesh(&m, shape, ds);
+            if (val != 1 && m.mType != 4)
+            {
+               return false;
+            }
          }
+      }
+      else
+      {
+         // TODO: use mesh index list
+         assert(false);
       }
       
       ds.readCheck();
       
       // Reading names
-      for (int i = 0; i < numNames; ++i)
+      for (int i = 0; i < numNames; i++)
       {
          std::string str;
-         readString(ds, str);
+         ds.readNullString(str);
          shape->mNameTable.addString(str);
       }
       
       ds.readCheck();
+      
+      if (ds.getVersion() < 23)
+      {
+         // TODO: need info about skins...
+         assert(false);
+      }
       
       shape->mPreviousMerge.clear();
       for (int i = 0; i < numObjects; ++i)
@@ -309,8 +352,8 @@ struct IO
    
    template<typename T> static bool readBox(T& ds, Box& box)
    {
-      ds.read(box.min);
-      ds.read(box.max);
+      readPoint3F(ds, box.min);
+      readPoint3F(ds, box.max);
       return true;
    }
    
@@ -321,7 +364,8 @@ struct IO
    
    template<typename T> static bool readPoint2F(T& ds, slm::vec2& box)
    {
-      ds.read(box);
+      ds.read(box.x);
+      ds.read(box.y);
       return true;
    }
    
@@ -332,7 +376,9 @@ struct IO
    
    template<typename T> static bool readPoint3F(T& ds, slm::vec3& box)
    {
-      ds.read(box);
+      ds.read(box.x);
+      ds.read(box.y);
+      ds.read(box.z);
       return true;
    }
    
@@ -343,6 +389,10 @@ struct IO
    
    template<typename T> static bool readQuat16(T& ds, Quat16& box)
    {
+      ds.read(box.x);
+      ds.read(box.y);
+      ds.read(box.z);
+      ds.read(box.w);
       return true;
    }
    
@@ -358,13 +408,16 @@ struct IO
    
    template<typename T> static bool readPoint4F(T& ds, slm::vec4& box)
    {
-      ds.read(box);
+      ds.read(box.x);
+      ds.read(box.y);
+      ds.read(box.z);
+      ds.read(box.w);
       return true;
    }
    
    template<typename T> static bool readMatrixF(T& ds, slm::mat4& box)
    {
-      ds.read(box);
+      ds.read32(sizeof(box) / 4, &box);
       return true;
    }
    
@@ -388,7 +441,15 @@ struct IO
    
    template<typename T> static bool readCluster(T& ds, Cluster& box)
    {
-      return false;
+      ds.read(box.startPrimitive);
+      ds.read(box.endPrimitive);
+      ds.read(box.normal.x);
+      ds.read(box.normal.y);
+      ds.read(box.normal.z);
+      ds.read(box.k);
+      ds.read(box.frontCluster);
+      ds.read(box.backCluster);
+      return true;
    }
    
    template<typename T> static bool writeCluster(T& ds, const Cluster& box)
@@ -398,7 +459,12 @@ struct IO
    
    template<typename T> static bool readNode(T& ds, Node& box)
    {
-      return false;
+      ds.read(box.name);
+      ds.read(box.parent);
+      ds.read(box.firstObject);
+      ds.read(box.firstChild);
+      ds.read(box.nextSibling);
+      return true;
    }
    
    template<typename T> static bool writeNode(T& ds, const Node& box)
@@ -408,6 +474,12 @@ struct IO
    
    template<typename T> static bool readObject(T& ds, Object& box)
    {
+      ds.read(box.name);
+      ds.read(box.numMeshes);
+      ds.read(box.firstMesh);
+      ds.read(box.node);
+      ds.read(box.sibling);
+      ds.read(box.firstDecal);
       return false;
    }
    
@@ -416,30 +488,12 @@ struct IO
       return false;
    }
    
-   template<typename T> static bool readSequence(T& ds, Sequence& box)
-   {
-      return false;
-   }
-   
-   template<typename T> static bool writeSequence(T& ds, const Sequence& box)
-   {
-      return false;
-   }
-   
-   template<typename T> static bool readMaterials(T& ds, MaterialList& box)
-   {
-      return false;
-   }
-   
-   template<typename T> static bool writeMaterials(T& ds, const MaterialList& box)
-   {
-      return false;
-   }
-   
-   
    template<typename T> static bool readObjectState(T& ds, ObjectState& box)
    {
-      return false;
+      ds.read(box.vis);
+      ds.read(box.frame);
+      ds.read(box.matFrame);
+      return true;
    }
    
    template<typename T> static bool writeObjectState(T& ds, const ObjectState& box)
@@ -449,14 +503,18 @@ struct IO
    
    template<typename T> static bool readIflMaterial(T& ds, IflMaterial& box)
    {
-      return false;
+      ds.read(box.name);
+      ds.read(box.slot);
+      ds.read(box.firstFrame);
+      ds.read(box.time);
+      ds.read(box.numFrames);
+      return true;
    }
    
    template<typename T> static bool writeIflMaterial(T& ds, const IflMaterial& box)
    {
       return false;
    }
-   
    
    template<typename T> static bool readDecal(T& ds, Decal& box)
    {
@@ -465,22 +523,18 @@ struct IO
    
    template<typename T> static bool writeDecal(T& ds, const Decal& box)
    {
-      return false;
-   }
-   
-   template<typename T> static bool readDecalData(T& ds, DecalData& box)
-   {
-      return false;
-   }
-   
-   template<typename T> static bool writeDecalData(T& ds, const DecalData& box)
-   {
-      return false;
+      ds.read(box.name);
+      ds.read(box.numMeshes);
+      ds.read(box.firstMesh);
+      ds.read(box.object);
+      ds.read(box.sibling);
+      return true;
    }
    
    template<typename T> static bool readDecalState(T& ds, DecalState& box)
    {
-      return false;
+      ds.read(box.frame);
+      return true;
    }
    
    template<typename T> static bool writeDecalState(T& ds, const DecalState& box)
@@ -490,7 +544,9 @@ struct IO
    
    template<typename T> static bool readTrigger(T& ds, Trigger& box)
    {
-      return false;
+      ds.read(box.state);
+      ds.read(box.pos);
+      return true;
    }
    
    template<typename T> static bool writeTrigger(T& ds, const Trigger& box)
@@ -500,14 +556,20 @@ struct IO
    
    template<typename T> static bool readDetailLevel(T& ds, DetailLevel& box)
    {
-      return false;
+      ds.read(box.name);
+      ds.read(box.subshape);
+      ds.read(box.objectDetail);
+      ds.read(box.size);
+      ds.read(box.avgError);
+      ds.read(box.maxError);
+      ds.read(box.polyCount);
+      return true;
    }
    
    template<typename T> static bool writeDetailLevel(T& ds, const DetailLevel& box)
    {
       return false;
    }
-   
    
    bool readSplit(MemRStream& stream, Shape* shape);
    bool writeSplit(MemRStream& write, Shape* shape, uint32_t version=DefaultVersion);
@@ -524,7 +586,6 @@ struct IO
          return false;
       }
       
-      
       BasicData* basicData = NULL;
       SkinData* skinData = NULL;
       
@@ -532,12 +593,13 @@ struct IO
       {
          skinData = new SkinData();
          basicData = dynamic_cast<BasicData*>(skinData);
+         mesh->mData = skinData;
       }
       else if (mesh->mType != Mesh::T_Decal)
       {
          basicData = new BasicData();
+         mesh->mData = basicData;
       }
-      
       
       if (basicData)
       {
@@ -584,10 +646,14 @@ struct IO
             {
                IO::readPoint3F(ds, vert);
             }
-            for (slm::vec3& vert : basicData->normals)
+            
+            if (ds.getVersion() > 21)
             {
-               uint8_t val = 0;
-               ds.read(val); // TODO: important?
+               for (slm::vec3& vert : basicData->normals)
+               {
+                  uint8_t val = 0;
+                  ds.read(val); // TODO: important?
+               }
             }
          }
          
@@ -644,10 +710,14 @@ struct IO
             {
                IO::readPoint3F(ds, vert);
             }
-            for (slm::vec3& vert : basicData->normals)
+            
+            if (ds.getVersion() > 21)
             {
-               uint8_t val = 0;
-               ds.read(val); // TODO: important?
+               for (slm::vec3& vert : basicData->normals)
+               {
+                  uint8_t val = 0;
+                  ds.read(val); // TODO: important?
+               }
             }
          }
          
@@ -726,34 +796,34 @@ struct IO
       {
          SortedData* sortedData = new SortedData;
          mesh->mData = sortedData;
-         /* TOFIX
-          
-          int sz = ds.reads32();
-          for (int cnt = 0; cnt < sz; ++cnt) {
-          clusters.push_back(ds.readCluster());
-          }
-          sz = ds.reads32();
-          for (int cnt = 0; cnt < sz; ++cnt) {
-          startCluster.push_back(ds.reads32());
-          }
-          int nfv = ds.reads32();
-          for (int cnt = 0; cnt < sz; ++cnt) {
-          firstVerts.push_back(ds.reads32());
-          }
-          sz = ds.reads32();
-          for (int cnt = 0; cnt < sz; ++cnt) {
-          numVerts.push_back(ds.reads32());
-          }
-          sz = ds.reads32();
-          for (int cnt = 0; cnt < sz; ++cnt) {
-          firstTVerts.push_back(ds.reads32());
-          }
-          alwaysWriteDepth = ds.readu32();
-          ds.readCheck();*/
-      }
-      else
-      {
-         assert(false);
+         
+         ds.read(sz);
+         sortedData->clusters.resize(sz);
+         
+         for (Cluster& cluster : sortedData->clusters)
+         {
+            IO::readCluster(ds, cluster);
+         }
+         
+         ds.read(sz);
+         sortedData->startCluster.resize(sz);
+         ds.read32(sz, &sortedData->startCluster[0]);
+         
+         ds.read(sz);
+         sortedData->firstVerts.resize(sz);
+         ds.read32(sz, &sortedData->firstVerts[0]);
+         
+         ds.read(sz);
+         sortedData->numVerts.resize(sz);
+         ds.read32(sz, &sortedData->numVerts[0]);
+         
+         ds.read(sz);
+         sortedData->firstTVerts.resize(sz);
+         ds.read32(sz, &sortedData->firstTVerts[0]);
+         
+         ds.read(sortedData->alwaysWriteDepth);
+         
+         ds.readCheck();
       }
    }
    
@@ -805,6 +875,11 @@ struct BasicStream
    
    void writeCheck()
    {
+   }
+   
+   void readNullString(std::string& value)
+   {
+      baseStream->readNullString(value);
    }
 };
 
@@ -882,21 +957,32 @@ struct SplitStream
    {
       uint32_t hdr[4];
       sourceStream.read(4 * sizeof(int32_t), hdr);
-      dtsVersion = hdr[1] & 0xFFFF;
+      dtsVersion = hdr[0] & 0xFF;
       baseStream = &sourceStream;
       
-      int32_t ver = hdr[0];
+      if (dtsVersion < 19)
+      {
+         assert(false);
+         return;
+      }
+      
       int32_t totalSize = hdr[1];
       int32_t offset16 = hdr[2];
       int32_t offset8 = hdr[3];
       
       int32_t allocated32 = offset16;
-      int32_t allocated16 = (offset8 - offset16) * 2;
-      int32_t allocated8 = (totalSize - offset8) * 4;
+      int32_t allocated16 = (offset8 - offset16);
+      int32_t allocated8 = (totalSize - offset8);
+      
+      uint32_t* start = (uint32_t*)(sourceStream.mPtr + sourceStream.mPos);
+      uint8_t* start16 = (uint8_t*)(start + offset16);
+      uint8_t* start8 = (uint8_t*)(start + offset8);
       
       buffer32.setOffsetView(sourceStream, 0, allocated32 * sizeof(int32_t));
-      buffer16.setOffsetView(sourceStream, 0, allocated16 * sizeof(int16_t));
-      buffer8.setOffsetView(sourceStream, 0, allocated8);
+      buffer16.setOffsetView(sourceStream, start16 - ((uint8_t*)start), allocated16 * sizeof(int32_t));
+      buffer8.setOffsetView(sourceStream, start8 - ((uint8_t*)start), allocated8 * sizeof(int32_t));
+      
+      sourceStream.mPos += totalSize*4;
       
       checkCount = 0;
       return true;
@@ -932,6 +1018,7 @@ struct SplitStream
          return true;
       }
       
+      assert(false);
       checkCount++;
       return false;
    }
@@ -962,15 +1049,15 @@ struct SplitStream
    // For normal scalar types
    template<typename T> inline bool read(T &value)
    {
-      if (sizeof(T) == 32)
+      if (sizeof(T) == 4)
       {
          return buffer32.read(value);
       }
-      else if (sizeof(T) == 16)
+      else if (sizeof(T) == 2)
       {
          return buffer16.read(value);
       }
-      else if (sizeof(T) == 8)
+      else if (sizeof(T) == 1)
       {
          return buffer8.read(value);
       }
@@ -1064,6 +1151,12 @@ struct SplitStream
    {
       buffer8.write((uint8_t)(value ? 1 : 0));
    }
+   
+   inline bool readNullString(std::string& value)
+   {
+      return buffer8.readNullString(value);
+   }
+   
 };
 
 }

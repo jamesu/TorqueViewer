@@ -827,13 +827,43 @@ public:
          e.compression = headerPtr->compression;
          e.filenameSize = headerPtr->file_name_length;
          e.filenameOffset = (uint8_t*)(headerPtr+1) - ((uint8_t*)&mCDData[0]);
-         e.dataOffset = 0;
+         e.dataOffset = headerPtr->local_header_offset;
          e.compressedSize = headerPtr->compressed_size;
          e.uncompressedSize = headerPtr->uncompressed_size;
          
          uint64_t extraLen = headerPtr->file_name_length + headerPtr->file_comment_length + headerPtr->extra_field_length;
          headerPtr++;
          headerPtr = (CentralHeader*)(((uint8_t*)headerPtr) + extraLen);
+         
+         const uint8_t* extraPtr = (((uint8_t*)headerPtr) + headerPtr->file_name_length + headerPtr->file_comment_length);
+         const uint8_t* endPtr = extraPtr + headerPtr->extra_field_length;
+         
+         while (extraPtr < endPtr)
+         {
+            uint16_t type = ((uint16_t*)extraPtr)[0];
+            uint16_t size = ((uint16_t*)extraPtr)[1];
+            extraPtr += 4;
+            
+            if (type == 0x0001)
+            {
+               uint64_t value = ((uint16_t*)extraPtr)[0];
+               uint64_t ofs = 0;
+               if (headerPtr->compressed_size == 0xffffffff)
+               {
+                  e.compressedSize = ((uint64_t*)headerPtr)[ofs++];
+               }
+               if (headerPtr->uncompressed_size == 0xffffffff)
+               {
+                  e.uncompressedSize = ((uint64_t*)headerPtr)[ofs++];
+               }
+               if (headerPtr->local_header_offset == 0xffffffff)
+               {
+                  e.dataOffset = ((uint64_t*)headerPtr)[ofs++];
+               }
+            }
+            
+            extraPtr += size;
+         }
       }
       
       for (Entry& e : mEntries)
@@ -857,7 +887,7 @@ public:
          if (fnLen == itr->filenameSize &&
              strncasecmp(filename, itr->getFilenamePtr(&mCDData[0]), fnLen) == 0)
          {
-            stream.seekg(itr->filenameOffset);
+            stream.seekg(itr->dataOffset);
             if (stream.fail())
             {
                return false;
@@ -873,6 +903,8 @@ public:
 
             uint64_t start = stream.tellg();
             stream.seekg(start + lh.file_name_length + lh.extra_field_length);
+            uint64_t realStart = start + lh.file_name_length + lh.extra_field_length;
+            
             if (stream.fail())
             {
                return false;
@@ -890,8 +922,26 @@ public:
 
             if (itr->compression != 0)
             {
+               if (itr->compression != 8)
+               {
+                  free(dataIn);
+                  return false;
+               }
+               
                // Validate compression
                dataOut = (uint8_t*)malloc(itr->uncompressedSize);
+               
+               if (itr->compression == 8)
+               {
+                  // TODO: 64bit
+                  if (stbi_zlib_decode_noheader_buffer((char*)dataOut, itr->uncompressedSize, (char*)dataIn, itr->compressedSize) < 0)
+                  {
+                     free(dataIn);
+                     free(dataOut);
+                     return false;
+                  }
+               }
+               
             }
 
             outStream = MemRStream(itr->uncompressedSize, dataOut ? dataOut : dataIn, true);
@@ -930,7 +980,10 @@ void ResManager::addVolume(const char *filename)
          return;
       }
       
+      file.clear();
       vol->mFile = std::move(file);
+      bool didFail = vol->mFile.fail();
+      assert(!didFail);
       vol->mName = filename;
       mVolumes.push_back(vol);
    }

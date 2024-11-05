@@ -146,7 +146,6 @@ public:
       mPos = 0;
       mSize = size;
       mOwnPtr = false;
-      mOwnPtr = true;
    }
    
    // For array types
@@ -262,6 +261,28 @@ public:
       }
       
       buf[sz] = '\0';
+      return true;
+   }
+   
+   bool readNullString(std::string& outS)
+   {
+      const char* strPtr = ((const char*)mPtr)+mPos;
+      uint32_t theLen = 0;
+      while (mPos < mSize && strPtr[theLen] != '\0')
+      {
+         theLen++;
+      }
+      
+      mPos += theLen;
+      if (strPtr[theLen] != '\0')
+      {
+         return false;
+      }
+      else
+      {
+         mPos++;
+         outS = strPtr;
+      }
       return true;
    }
    

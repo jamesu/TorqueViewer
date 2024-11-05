@@ -68,31 +68,6 @@ public:
       return addString(str, true);
    }
    
-   void reads(MemRStream& fs)
-   {
-      uint8_t length;
-      fs.read(length);
-      
-      if (length == 0) {
-         return "";
-      }
-      
-      std::string str(length, '\0');
-      fs.read(length, &str[0]);
-      mStrings.push_back(str);
-      return str;
-   }
-   
-   void write(MemRStream& fs)
-   {
-      for (const auto& str : mStrings)
-      {
-         uint8_t length = static_cast<uint8_t>(str.length());
-         fs.write(length);
-         fs.write(length, str.c_str());
-      }
-   }
-   
 private:
    
    static std::string emptyString;
@@ -119,8 +94,8 @@ struct Primitive
       MaterialMask = 0xFFFFFFF
    };
    
-   int firstElement;
-   int numElements;
+   uint16_t firstElement;
+   uint16_t numElements;
    Type matIndex;
    
    Primitive(int fe=0, int ne=0, Type ty=Triangles) :
@@ -134,12 +109,12 @@ struct Cluster
 {
    int startPrimitive;
    int endPrimitive;
-   void* normal;
+   slm::vec3 normal;
    float k;
    int frontCluster;
    int backCluster;
    
-   Cluster(int sp = 0, int ep = 0, void* nrm = nullptr, float kn = 0.0, int fc = 0, int bc = 0)
+   Cluster(int sp = 0, int ep = 0, slm::vec3 nrm = slm::vec3(0), float kn = 0.0, int fc = 0, int bc = 0)
    : startPrimitive(sp), endPrimitive(ep), normal(nrm), k(kn), frontCluster(fc), backCluster(bc)
    {
    }
@@ -152,10 +127,10 @@ struct IflMaterial
    int slot;
    int firstFrame;
    float time;
-   int mNumFrames;
+   int numFrames;
    
    IflMaterial(int na=0, int sl=0, int ff=0, float ti=0.0f, int nf=0) :
-   name(na), slot(sl), firstFrame(ff), time(ti), mNumFrames(nf)
+   name(na), slot(sl), firstFrame(ff), time(ti), numFrames(nf)
    {
    }
 };
@@ -385,18 +360,25 @@ struct Sequence
 // here since we need to factor in parent data without relying
 // too much on the stream.
 
-struct BasicData
+struct AbstractData
+{
+   virtual ~AbstractData()
+   {
+   }
+};
+
+struct BasicData : public AbstractData
 {
    std::vector<slm::vec3> verts;
    std::vector<slm::vec2> tverts;
    std::vector<slm::vec3> normals;
    std::vector<uint8_t> enormals;
    std::vector<Primitive> primitives;
-   std::vector<uint32_t> indices;
-   std::vector<uint32_t> mergeIndices;
+   std::vector<uint16_t> indices;
+   std::vector<uint16_t> mergeIndices;
 };
 
-struct DecalData
+struct DecalData : public AbstractData
 {
    std::vector<Primitive> primitives;
    std::vector<uint16_t> indices;
@@ -420,8 +402,8 @@ struct SortedData : public BasicData
 {
    std::vector<Cluster> clusters;
    std::vector<int32_t> startCluster;
-   std::vector<uint16_t> startPrimitive;
    std::vector<int32_t> firstVerts;
+   std::vector<int32_t> numVerts;
    std::vector<int32_t> firstTVerts;
    bool alwaysWriteDepth;
 };
@@ -454,7 +436,7 @@ public:
    
    Type mType;
    uint32_t mFlags;
-   void* mData;
+   AbstractData* mData;
    
    // Common data
    uint32_t mNumFrames;
@@ -505,24 +487,7 @@ public:
       if (mData == NULL)
          return;
       
-      switch (mType)
-      {
-         case T_Standard:
-            delete reinterpret_cast<BasicData*>(mData);
-            break;
-         case T_Skin:
-            delete reinterpret_cast<SkinData*>(mData);
-            break;
-         case T_Decal:
-            delete reinterpret_cast<DecalData*>(mData);
-            break;
-         case T_Sorted:
-            delete reinterpret_cast<SortedData*>(mData);
-            break;
-         default:
-            break;
-      }
-      
+      delete mData;
       mData = NULL;
    }
    
