@@ -36,6 +36,8 @@ namespace fs = boost::filesystem;
 namespace fs = std::filesystem;
 #endif
 
+#include "CommonShaderTypes.h"
+
 #define BIT(x) (((uint32_t)1)<<(x))
 
 struct _LineVert
@@ -45,6 +47,8 @@ struct _LineVert
    slm::vec3 normal;
    slm::vec4 color;
 };
+
+
 
 inline uint32_t getNextPow2(uint32_t a)
 {
@@ -960,6 +964,27 @@ public:
    {
       BINARY_FILE_VERSION = 1
    };
+   
+   enum TSFlags : uint32_t
+   {
+      S_Wrap = BIT(0),
+      T_Wrap = BIT(1),
+      Translucent = BIT(2),
+      Additive = BIT(3),
+      Subtractive = BIT(4),
+      SelfIlluminating = BIT(5),
+      NeverEnvMap = BIT(6),
+      NoMipMap = BIT(7),
+      MipMap_ZeroBorder = BIT(8),
+      //
+      IflMaterial = BIT(27),
+      IflFrame = BIT(28),
+      //
+      DetailMapOnly = BIT(29),
+      BumpMapOnly = BIT(30),
+      RelfectanceMapOnly = BIT(31),
+      AuxiliaryMap = DetailMapOnly | BumpMapOnly | RelfectanceMapOnly
+   };
 
    enum Variant : uint8_t
    {
@@ -987,10 +1012,6 @@ public:
       std::string name;
       // ~8
 
-      uint32_t texID;
-      uint32_t texGroupID;
-      // +8
-
       union
       {
          TSProperties tsProps; // 12
@@ -998,12 +1019,12 @@ public:
 
       // ~28
 
-      Material() : texID(0), texGroupID(0)
+      Material()// : texID(0), texGroupID(0)
       {
          tsProps = {};
       }
 
-      Material(const char* _name) : texID(0), texGroupID(0)
+      Material(const char* _name)// : texID(0), texGroupID(0)
       {
          name = _name;
          tsProps = {};

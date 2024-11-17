@@ -71,6 +71,7 @@ struct IO
       else
       {
          // node counts are different
+         uint32_t sz = 0;
          ds.read(sz);
          numNodeRots = numNodeTrans = sz - numNodes;
       }
@@ -167,19 +168,18 @@ struct IO
          ds.read(s.numNodes);
          ds.read(s.numObjects);
          ds.read(s.numDecals);
+         s.firstTranslucent = -1;
       }
       
       ds.readCheck();
       
-      for (SubShape& s : shape->mSubshapes)
-      {
-         ds.read(s.firstTranslucent);
-      }
+      // NOTE: firstTranslucent isn't stored in file
       
       // Mesh index list for old shapes
       std::vector<uint32_t> meshIndexList;
       if (ds.getVersion() < 16)
       {
+         uint32_t sz = 0;
          ds.read(sz);
          ds.read32(sz, &meshIndexList[0]);
       }
@@ -478,7 +478,7 @@ struct IO
       ds.read(box.numMeshes);
       ds.read(box.firstMesh);
       ds.read(box.node);
-      ds.read(box.sibling);
+      ds.read(box.nextSibling);
       ds.read(box.firstDecal);
       return false;
    }
@@ -527,7 +527,7 @@ struct IO
       ds.read(box.numMeshes);
       ds.read(box.firstMesh);
       ds.read(box.object);
-      ds.read(box.sibling);
+      ds.read(box.nextSibling);
       return true;
    }
    
@@ -1006,6 +1006,10 @@ struct SplitStream
       uint8_t c8 = 0;
       uint16_t c16 = 0;
       uint32_t c32 = 0;
+      
+      uint8_t* b8Data = buffer8.mPtr + buffer8.mPos;
+      uint16_t* b16Data = (uint16_t*)(buffer16.mPtr + buffer16.mPos);
+      uint32_t* b32Data = (uint32_t*)(buffer32.mPtr + buffer32.mPos);
       
       buffer8.read(c8);
       buffer16.read(c16);

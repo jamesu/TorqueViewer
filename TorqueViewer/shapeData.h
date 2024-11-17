@@ -139,9 +139,9 @@ struct Decal
 {
    int name;
    int numMeshes;
-   int firstMesh;
-   int object;
-   int sibling;
+   int firstMesh; ///< First decal mesh
+   int object;    ///< Used by loading code to assign firstDecal list
+   int nextSibling;
 };
 
 struct DetailLevel
@@ -152,9 +152,9 @@ struct DetailLevel
    }
    
    int name;
-   int subshape;
-   int objectDetail;
-   float size;
+   int subshape;     ///< Subshape to use for this detail level
+   int objectDetail; ///< Mesh index to use for objects
+   float size;       ///< Pixel size
    int avgError;
    int maxError;
    int polyCount;
@@ -162,9 +162,9 @@ struct DetailLevel
 
 struct SubShape
 {
-   int firstNode;
-   int firstObject;
-   int firstDecal;
+   int firstNode;    ///< First node to ANIMATE
+   int firstObject;  ///< First object to RENDER
+   int firstDecal;   ///< First decal to RENDER
    int numNodes;
    int numObjects;
    int numDecals;
@@ -180,19 +180,32 @@ struct Object
 {
    int name;
    int numMeshes;
-   int firstMesh;
-   int node;
-   int sibling;
-   int firstDecal;
+   int firstMesh;      ///< Index of first mesh
+   int node;           ///< Corresponds to the base transform used for rendering
+   int nextSibling;    ///< Corresponds to next object in chain; determined at runtime
+   int firstDecal;     ///< Corresponds to first decal used; determined at runtime, used for debris
+   
+   void resetRuntime()
+   {
+      firstDecal = -1;
+      nextSibling = -1;
+   }
 };
 
 struct Node
 {
    int name;
    int parent;
-   int firstObject;
-   int firstChild;
-   int nextSibling;
+   int firstObject; ///< First object used by node; determined at runtime
+   int firstChild;  ///< First child of node; determined at runtime
+   int nextSibling; ///< Next sibling of node; determined at runtime
+   
+   void resetRuntime()
+   {
+      firstObject = -1;
+      firstChild = -1;
+      nextSibling = -1;
+   }
 };
 
 struct DecalState
@@ -270,14 +283,16 @@ struct Sequence
    int numTriggers;
    float toolBegin;
    
-   IntegerSet mattersRot;
-   IntegerSet mattersTranslation;
-   IntegerSet mattersScale;
-   IntegerSet mattersDecal;
-   IntegerSet mattersIfl;
-   IntegerSet mattersVis;
-   IntegerSet mattersFrame;
-   IntegerSet mattersMatframe;
+   IntegerSet mattersRot;        // matters mask for node*Rotation
+   IntegerSet mattersTranslation;// matters mask for node*Translation
+   IntegerSet mattersScale;      // matters mask for node*Scale
+   IntegerSet mattersDecal;      // matters mask for DecalState frame
+   IntegerSet mattersIfl;        // matters mask for IFLMaterial frame
+   IntegerSet mattersVis;        // matters mask for ObjectState vis
+   IntegerSet mattersFrame;      // matters mask for ObjectState frame
+   IntegerSet mattersMatframe;   // matters mask for ObjectState matFrame (goes f1mf1 f1mf2 f2mf1 f2mf2 ...)
+   
+   // NOTE: ObjectState is a slight mess here since vis,frame,matFrame are all combined.
    
    // Constructor
    Sequence(int na = 0, int fl = 0, int nk = 0, float du = 0.0, int pri = 0,
@@ -292,6 +307,12 @@ struct Sequence
    
    ~Sequence()
    {
+   }
+   
+   
+   inline bool testFlags(uint32_t inFlags) const
+   {
+      return (flags & inFlags) != 0;
    }
    
    void read(MemRStream &fs, int version)
@@ -382,7 +403,7 @@ struct DecalData : public AbstractData
 {
    std::vector<Primitive> primitives;
    std::vector<uint16_t> indices;
-   std::vector<int32_t> startPrimitive;
+   std::vector<int32_t> startPrimitive; // frame offsets for primitives
    std::vector<slm::vec4> texGenS;
    std::vector<slm::vec4> texGenT;
    uint32_t meshIndex;
@@ -391,11 +412,11 @@ struct DecalData : public AbstractData
 
 struct SkinData : public BasicData
 {
-   std::vector<uint32_t> vindex;
-   std::vector<uint32_t> bindex;
-   std::vector<uint32_t> vweight;
-   std::vector<uint32_t> nodeIndex;
-   std::vector<slm::mat4> nodeTransforms;
+   std::vector<uint32_t> vindex; // local vertex
+   std::vector<uint32_t> bindex; // local node index
+   std::vector<float> vweight;   // local node weight
+   std::vector<uint32_t> nodeIndex;       // global node -> local node
+   std::vector<slm::mat4> nodeTransforms; // local node conversion transform
 };
 
 struct SortedData : public BasicData
@@ -407,6 +428,47 @@ struct SortedData : public BasicData
    std::vector<int32_t> firstTVerts;
    bool alwaysWriteDepth;
 };
+
+
+static void EmitModelVertices(BasicData* basicData, ModelVertex* outv)
+{
+   for (uint32_t i=0; i<basicData->verts.size(); i++)
+   {
+      ModelVertex& ov = outv[i];
+      ov.position = basicData->verts[i];
+      ov.normal = basicData->normals[i];
+   }
+}
+
+static void EmitModelTexVertices(BasicData* basicData, ModelTexVertex* outv)
+{
+   for (uint32_t i=0; i<basicData->tverts.size(); i++)
+   {
+      ModelTexVertex& ov = outv[i];
+      ov.texcoord = basicData->tverts[i];
+   }
+}
+
+static void EmitPackedSkinVertices(SkinData* skinData, ModelSkinVertex* outv)
+{
+   for (size_t i = 0; i < skinData->vindex.size(); i++)
+   {
+      uint32_t vIdx = skinData->vindex[i];
+      uint32_t bIdx = skinData->bindex[i];
+      float weight = skinData->vweight[i];
+      
+      ModelSkinVertex& ov = outv[vIdx];
+      for (uint8_t j=0; j<ModelSkinVertex::MAX_WEIGHTS; j++)
+      {
+         if (ov.weights[j] != 0.0f)
+         {
+            ov.index[j] = bIdx;
+            ov.weights[j] = weight;
+            break;
+         }
+      }
+   }
+}
 
 class Mesh
 {
@@ -720,10 +782,29 @@ class Thread
 };
 
 
+class ShapeViewer;
+
 class Shape : public ResourceInstance
 {
    friend class IO;
-protected:
+   friend class ShapeViewer;
+   
+public:
+   
+   enum Flag : uint8_t
+   {
+      UniformScale = BIT(0),
+      AlignedScale = BIT(1),
+      ArbitraryScale = BIT(2),
+      Blend = BIT(3),
+      Cyclic = BIT(4),
+      MakePath = BIT(5),
+      IflInit = BIT(6),
+      HasTranslucency = BIT(7),
+      AnyScale = UniformScale | AlignedScale | ArbitraryScale
+   };
+   
+//protected:
    
    // Bounds
    Box mBounds;
@@ -770,6 +851,8 @@ protected:
    bool mExportMerge;
    int mSmallestVisibleSize;
    int mSmallestVisibleDetailLevel;
+   
+   uint32_t mRuntimeFlags;
    
 public:
    Shape() : mTubeRadius(0), mRadius(0), mExportMerge(false),

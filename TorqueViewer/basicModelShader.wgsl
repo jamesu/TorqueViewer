@@ -9,6 +9,8 @@ struct CommonUniforms {
 };
 
 @group(0) @binding(0) var<uniform> commonUniforms: CommonUniforms;
+
+
 @group(1) @binding(0) var texture0: texture_2d<f32>;
 @group(1) @binding(1) var sampler0: sampler;
 

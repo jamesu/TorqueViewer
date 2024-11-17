@@ -170,6 +170,7 @@ struct SDLState
       ModelVertex* vertData;
       ModelTexVertex* texVertData;
       uint16_t* indexData;
+      ModelSkinVertex* skinData;
       
       // uploaded to gpu this frame?
       bool inFrame;
@@ -1642,7 +1643,7 @@ int32_t GFXLoadCustomTexture(CustomTextureFormat fmt, uint32_t width, uint32_t h
       newInfo.dims[2] = textureDesc.size.depthOrArrayLayers;
       
       // Find or add texture to smState.textures
-      int sz = smState.textures.size();
+      int sz = (int)smState.textures.size();
       for (int i = 0; i < sz; i++)
       {
          if (smState.textures[i].texture == NULL)
@@ -1663,6 +1664,37 @@ int32_t GFXLoadCustomTexture(CustomTextureFormat fmt, uint32_t width, uint32_t h
    }
    
    return -1;
+}
+
+void GFXUpdateCustomTextureAligned(int32_t texID, void* texData)
+{
+   if (texID < 0)
+      return;
+   
+   SDLState::TexInfo& info = smState.textures[texID];
+   
+   // Upload texture data
+   WGPUTextureDataLayout layout = {};
+   layout.offset = 0;
+   layout.bytesPerRow = info.dims[0];
+   layout.rowsPerImage = info.dims[1];
+   WGPUExtent3D size = {info.dims[0], info.dims[1], 1};
+   
+   WGPUImageCopyTexture copyInfo = {};
+   copyInfo.texture = info.texture;
+   copyInfo.mipLevel = 0;
+   copyInfo.origin = (WGPUOrigin3D){0, 0, 0};
+   copyInfo.aspect = WGPUTextureAspect_All;
+   
+   
+   uint32_t alignedMipSize = info.dims[0] * info.dims[1];
+   
+   wgpuQueueWriteTexture(smState.gpuQueue,
+                         &copyInfo,
+                         texData,
+                         alignedMipSize,
+                         &layout,
+                         &size);
 }
 
 int32_t GFXLoadTexture(Bitmap* bmp, Palette* defaultPal)
@@ -1745,7 +1777,7 @@ int32_t GFXLoadTexture(Bitmap* bmp, Palette* defaultPal)
       newInfo.texBindGroup = smState.makeSimpleTextureBG(texView, smState.modelCommonSampler);
       
       // Find or add texture to smState.textures
-      int sz = smState.textures.size();
+      int sz = (int)smState.textures.size();
       for (int i = 0; i < sz; i++)
       {
          if (smState.textures[i].texture == NULL)
@@ -1865,7 +1897,7 @@ int32_t GFXLoadTextureSet(uint32_t numBitmaps, Bitmap** bmps, Palette* defaultPa
     newInfo.texBindGroup = NULL;//smState.makeSimpleTextureBG(texView, smState.modelCommonSampler);
 
     // Find or add texture to smState.textures
-    int sz = smState.textures.size();
+    int sz = (int)smState.textures.size();
     for (int i = 0; i < sz; i++)
     {
         if (smState.textures[i].texture == NULL)
@@ -1896,7 +1928,7 @@ void GFXDeleteTexture(int32_t texID)
    tex.textureView = NULL;
 }
 
-void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds)
+void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds)
 {
    SDLState::FrameModel blankModel = {};
    while (smState.models.size() <= modelId)
@@ -1911,10 +1943,16 @@ void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds,
       delete[] model.texVertData;
    if (model.indexData)
       delete[] model.indexData;
+   if (model.skinData)
+      delete[] model.skinData;
    
    model.vertData = new ModelVertex[numVerts];
    model.texVertData = new ModelTexVertex[numTexVerts];
    model.indexData = new uint16_t[numInds];
+   if (skin)
+   {
+      model.skinData = new ModelSkinVertex[numVerts];
+   }
    
    model.numVerts = numVerts;
    model.numTexVerts = numTexVerts;
@@ -1923,6 +1961,10 @@ void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds,
    memcpy(model.vertData, verts, sizeof(ModelVertex) * numVerts);
    memcpy(model.texVertData, texverts, sizeof(ModelTexVertex) * numTexVerts);
    memcpy(model.indexData, inds, sizeof(uint16_t) * numInds);
+   if (skin)
+   {
+      memcpy(model.skinData, inds, sizeof(ModelSkinVertex) * numVerts);
+   }
 }
 
 void GFXClearModelData(uint32_t modelId)
@@ -1949,7 +1991,7 @@ void GFXClearModelData(uint32_t modelId)
    model.numInds = 0;
 }
 
-void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &proj)
+void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &proj, uint32_t flags)
 {
    smState.modelMatrix = model;
    smState.projectionMatrix = proj;
@@ -1982,7 +2024,17 @@ void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient)
    }
 }
 
-void GFXBeginModelPipelineState(ModelPipelineState state, int32_t texID, float testVal)
+void GFXSetTSMaterialResources(uint32_t tsGroupID, int32_t diffuseTexID, int32_t emapAlphaTexID, int32_t emapTexID, int32_t dmapID)
+{
+   // TODO
+}
+
+void GFXSetITRMaterialResources(uint32_t itrGroupID, int32_t baseTexID, int32_t emapTexID, int32_t lightmapTexID)
+{
+   // TODO
+}
+
+void GFXBeginTSModelPipelineState(ModelPipelineState state, uint32_t tsGroupID, float testVal, bool depthPeel, bool swapDepth)
 {
    smState.currentPipeline = smState.modelProgram.pipelines[state];
    smState.currentProgram = &smState.modelProgram;
@@ -2001,11 +2053,39 @@ void GFXBeginModelPipelineState(ModelPipelineState state, int32_t texID, float t
    }
    
    // Set texture
-   SDLState::TexInfo& info = smState.textures[texID];
-   wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 1, info.texBindGroup, 0, NULL);
+   //SDLState::TexInfo& info = smState.textures[texID];
+   //wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 1, info.texBindGroup, 0, NULL);
 }
 
-void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset)
+void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID, float testVal, bool depthPeel, bool swapDepth)
+{
+   smState.currentPipeline = smState.modelProgram.pipelines[state];
+   smState.currentProgram = &smState.modelProgram;
+   wgpuRenderPassEncoderSetPipeline(smState.renderEncoder, smState.currentPipeline);
+   
+   GFXSetLightPos(smState.lightPos, smState.lightColor);
+   GFXSetModelViewProjection(smState.modelMatrix, smState.viewMatrix, smState.projectionMatrix);
+   
+   if (state == ModelPipeline_DefaultDiffuse)
+   {
+      smState.modelProgram.uniforms.params2.x = testVal;
+   }
+   else
+   {
+      smState.modelProgram.uniforms.params2.x = 1.1f;
+   }
+   
+   // Set texture
+   //SDLState::TexInfo& info = smState.textures[texID];
+   //wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 1, info.texBindGroup, 0, NULL);
+}
+
+void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT)
+{
+   // TODO
+}
+
+void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset, uint32_t indexOffset)
 {
    SDLState::FrameModel& model = smState.models[modelId];
    const size_t vertSize = sizeof(ModelVertex) * model.numVerts;
@@ -2027,7 +2107,7 @@ void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset)
       model.inFrame = true;
    }
    
-   wgpuRenderPassEncoderSetIndexBuffer(smState.renderEncoder, model.indexOffset.buffer, WGPUIndexFormat_Uint16, model.indexOffset.offset, model.numInds * sizeof(uint16_t));
+   wgpuRenderPassEncoderSetIndexBuffer(smState.renderEncoder, model.indexOffset.buffer, WGPUIndexFormat_Uint16, model.indexOffset.offset + indexOffset, model.numInds * sizeof(uint16_t));
        
    wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 0, model.vertOffset.buffer, model.vertOffset.offset + vertOffset, vertSize);
    wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 1, model.texVertOffset.buffer, model.texVertOffset.offset + texOffset, texVertSize);
@@ -2039,7 +2119,7 @@ void GFXDrawModelVerts(uint32_t numVerts, uint32_t startVerts)
    wgpuQueueWriteBuffer(smState.gpuQueue, uniformData.buffer, uniformData.offset, &smState.currentProgram->uniforms, sizeof(CommonUniformStruct));
    
    uint32_t offsets[1];
-   offsets[0] = uniformData.offset;
+   offsets[0] = (uint32_t)uniformData.offset;
    wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 0, smState.commonUniformGroup, 1, offsets);
    
    wgpuRenderPassEncoderDraw(smState.renderEncoder, numVerts, 1, startVerts, 0);

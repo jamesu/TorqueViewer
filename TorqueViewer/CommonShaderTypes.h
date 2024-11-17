@@ -41,9 +41,9 @@ typedef slm::vec2 viewport_size;
 enum ModelPipelineState
 {
    ModelPipeline_DefaultDiffuse,
+   ModelPipeline_TranslucentBlend,
    ModelPipeline_AdditiveBlend,
    ModelPipeline_SubtractiveBlend,
-   ModelPipeline_TranslucentBlend,
    ModelPipeline_Count
 };
 
@@ -73,6 +73,17 @@ typedef struct
 {
    packed_float2 texcoord;
 } ModelTexVertex;
+
+typedef struct
+{
+   enum
+   {
+      MAX_WEIGHTS = 8
+   };
+   
+   uint8_t index[MAX_WEIGHTS];
+   float weights[MAX_WEIGHTS];
+} ModelSkinVertex;
 
 typedef struct
 {

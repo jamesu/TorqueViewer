@@ -549,6 +549,7 @@ bool MaterialList::parseFromStream(MemRStream& s)
 
 bool MaterialList::loadFromPath(const char* path)
 {
+#if 0
    for (uint32_t i=0; i<mMaterials.size(); i++)
    {
       loadMaterial(i, path);
@@ -558,6 +559,7 @@ bool MaterialList::loadFromPath(const char* path)
       if (name && *name && th > 0)
          return false;
    }
+#endif
    
    return true;
 }
