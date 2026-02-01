@@ -39,7 +39,7 @@
 #include "CommonData.h"
 
 #include "lineShader.wgsl.h"
-#include "modelShader.wgsl.h"
+#include "skinnedModelShader.wgsl.h"
 #include "terrainShader.wgsl.h"
 
 #include "RendererHelper.h"

@@ -26,7 +26,7 @@ endfunction()
 
 
 generate_escaped_string_header("TorqueViewer/lineShader.wgsl" "${CMAKE_BINARY_DIR}/lineShader.wgsl.h" "sLineShaderCode")
-generate_escaped_string_header("TorqueViewer/modelShader.wgsl" "${CMAKE_BINARY_DIR}/modelShader.wgsl.h" "sModelShaderCode")
+generate_escaped_string_header("TorqueViewer/skinnedModelShader.wgsl" "${CMAKE_BINARY_DIR}/skinnedModelShader.wgsl.h" "sModelShaderCode")
 generate_escaped_string_header("TorqueViewer/terrainShader.wgsl" "${CMAKE_BINARY_DIR}/terrainShader.wgsl.h" "sTerrainShaderCode")
 
 

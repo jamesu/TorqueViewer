@@ -498,7 +498,7 @@ public:
    
    Type mType;
    uint32_t mFlags;
-   AbstractData* mData;
+   std::shared_ptr<AbstractData> mData;
    
    // Common data
    uint32_t mNumFrames;
@@ -516,40 +516,31 @@ public:
       
    }
    
-   ~Mesh()
-   {
-      clearData();
-   }
-   
    BasicData* getBasicData() const
    {
       if (mType < T_Null && mType != T_Decal)
-         return reinterpret_cast<BasicData*>(mData);
+         return reinterpret_cast<BasicData*>(mData.get());
       else
          return NULL;
    }
    
    SkinData* getSkinData() const
    {
-      return mType == T_Skin ? reinterpret_cast<SkinData*>(mData) : NULL;
+      return mType == T_Skin ? reinterpret_cast<SkinData*>(mData.get()) : NULL;
    }
    
    DecalData* getDecalData() const
    {
-      return mType == T_Decal ? reinterpret_cast<DecalData*>(mData) : NULL;
+      return mType == T_Decal ? reinterpret_cast<DecalData*>(mData.get()) : NULL;
    }
    
    SortedData* getSortedData() const
    {
-      return mType == T_Sorted ? reinterpret_cast<SortedData*>(mData) : NULL;
+      return mType == T_Sorted ? reinterpret_cast<SortedData*>(mData.get()) : NULL;
    }
    
    void clearData()
    {
-      if (mData == NULL)
-         return;
-      
-      delete mData;
       mData = NULL;
    }
    

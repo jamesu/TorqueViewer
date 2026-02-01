@@ -438,14 +438,14 @@ public:
    int32_t mAlwaysNode;
    int32_t mCurrentDetail;
    
-   template<typename T> struct TransformTexInfo
+   template<typename T> struct FrameTexInfo
    {
       int32_t texID;
       uint32_t memoryUsed;
       uint32_t memorySize;
       T* updateMem;
       
-      TransformTexInfo() : texID(-1), memoryUsed(0), memorySize(0), updateMem(NULL)
+      FrameTexInfo() : texID(-1), memoryUsed(0), memorySize(0), updateMem(NULL)
       {
       }
       
@@ -589,10 +589,10 @@ public:
       if (meshTransforms.size() > 0)
       {
          nodeMeshTransformsTex.allocTransforms(meshTransforms.size() * 16);
-         nodeMeshTransformsTex.ensureValid(meshTransforms.size(), (float*)&meshTransforms[0]);
+         nodeMeshTransformsTex.ensureValid(meshTransforms.size(), (float*)meshTransforms.data());
          
          nodeMeshIndexTex.allocTransforms(boneIndexes.size());
-         nodeMeshTransformsTex.ensureValid(boneIndexes.size(), (uint32_t*)&boneIndexes[0]);
+         nodeMeshIndexTex.ensureValid(boneIndexes.size(), boneIndexes.data());
       }
       
       // Alloc node transform texture for single instance

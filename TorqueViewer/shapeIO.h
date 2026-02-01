@@ -176,7 +176,7 @@ struct IO
       // NOTE: firstTranslucent isn't stored in file
       
       // Mesh index list for old shapes
-      std::vector<uint32_t> meshIndexList;
+      std::vector<int32_t> meshIndexList;
       if (ds.getVersion() < 16)
       {
          uint32_t sz = 0;
@@ -280,22 +280,38 @@ struct IO
       ds.readCheck();
       
       // Reading meshes
+      // NOTE: to simplify things, we ignore skipping.
+      uint32_t totalMeshes = numMeshes + numSkins; // should just be numMeshes in version <23
+      
       if (ds.getVersion() > 15)
       {
          shape->mMeshes.resize(numMeshes);
          for (Mesh& m : shape->mMeshes)
          {
             ds.read(m.mType);
-            int val = readMesh(&m, shape, ds);
-            if (val != 1 && m.mType != 4)
-            {
-               return false;
-            }
+            bool didRead = readMesh(&m, shape, ds);
          }
       }
       else
       {
-         // TODO: use mesh index list
+         shape->mMeshes.resize(numMeshes);
+         
+         // Use mesh index list
+         for (uint32_t i=0; i<meshIndexList.size(); i++)
+         {
+            int32_t meshIndex = meshIndexList[i];
+            if (meshIndex >= 0)
+            {
+               Mesh& m = shape->mMeshes[i];
+               ds.read(m.mType);
+               bool didRead = readMesh(&m, shape, ds);
+            }
+            else
+            {
+               // No mesh
+               shape->mMeshes[i] = Mesh();
+            }
+         }
          assert(false);
       }
       
@@ -313,7 +329,32 @@ struct IO
       
       if (ds.getVersion() < 23)
       {
-         // TODO: need info about skins...
+         // Skinned mesh counts are stored here
+         std::vector<int32_t> detailFirstSkin(numDetails);
+         std::vector<int32_t> detailNumSkins(numSkins);
+         
+         for (int32_t& value : detailFirstSkin)
+         {
+            ds.read(value);
+         }
+         for (int32_t& value : detailNumSkins)
+         {
+            ds.read(value);
+         }
+         
+         ds.readCheck();
+         
+         for (uint32_t i=0; i<numSkins; i++)
+         {
+            Mesh& m = shape->mMeshes[numMeshes + i];
+            m.mType = Mesh::T_Skin;
+            bool didRead = readMesh(&m, shape, ds);
+         }
+         
+         ds.readCheck();
+         
+         correctPreV32Skins(shape, detailFirstSkin, detailNumSkins, numMeshes, numSkins, numDetails);
+         
          assert(false);
       }
       
@@ -325,6 +366,152 @@ struct IO
       
       shape->mExportMerge = ds.getVersion() >= 23;
       return true;
+   }
+   
+   static void correctPreV32Skins(Shape* shape, const std::vector<int32_t>& detailFirstSkin, const std::vector<int32_t>& detailNumSkins, uint32_t numMeshes, uint32_t numSkins, uint32_t numDetails)
+   {
+      if (numSkins == 0 || numDetails == 0 ||
+          detailFirstSkin.size() < numDetails || detailNumSkins.size() < numDetails)
+      {
+         return;
+      }
+      
+      auto& meshes       = shape->mMeshes;
+      auto& objects      = shape->mObjects;
+      auto& objectStates = shape->mObjectStates;
+      auto& subshapes    = shape->mSubshapes;
+      auto& sequences    = shape->mSequences;
+
+      // Count present skins in the tail.
+      uint32_t present = 0;
+      for (uint32_t i = 0; i < numSkins; ++i)
+      {
+         present += meshes[numMeshes + i].mType != Mesh::T_Null;
+      }
+      
+      if (present == 0)
+      {
+         return;
+      }
+
+      const size_t oldNumObjects = objects.size();
+
+      std::vector<Mesh> skinsCopy;
+      skinsCopy.reserve(numSkins);
+
+      uint32_t skinsUsed = 0;
+      uint32_t numSkinObjects = 0;
+
+      auto takeSkin = [&](uint32_t skinIdx) -> bool
+      {
+         Mesh& src = meshes[numMeshes + skinIdx];
+         if (src.mType == Mesh::T_Null)
+         {
+            return false;
+         }
+         
+         skinsCopy.push_back(std::move(src));
+         
+         // Leave a definite NULL behind.
+         src.mType = Mesh::T_Null;
+         src.mFlags = 0;
+         src.mData.reset();
+
+         ++skinsUsed;
+         return true;
+      };
+
+      while (skinsUsed < present)
+      {
+         Object obj{};
+         obj.name        = 0;   // no name
+         obj.node        = -1;
+         obj.nextSibling = -1;
+         obj.firstDecal  = -1;
+
+         obj.firstMesh = int(numMeshes + skinsCopy.size());
+         obj.numMeshes = 0;
+
+         for (uint32_t dl = 0; dl < numDetails; ++dl)
+         {
+            // NOTE: These numbers are basically relative to the skin mesh list
+            bool found = false;
+            const int32_t first = detailFirstSkin[dl];
+            const int32_t cnt   = detailNumSkins[dl];
+
+            if (first >= 0 && cnt > 0)
+            {
+               const int32_t end = std::min<int32_t>(first + cnt, (int32_t)numSkins);
+               for (int32_t i = first; i < end; ++i)
+               {
+                  if (takeSkin((uint32_t)i))
+                  {
+                     found = true;
+                     ++obj.numMeshes;
+                     break;
+                  }
+               }
+            }
+
+            if (!found)
+            {
+               skinsCopy.emplace_back(Mesh::T_Null); // placeholder for this detail
+               ++obj.numMeshes;
+            }
+         }
+
+         // Trim trailing null placeholders.
+         while (!skinsCopy.empty() && skinsCopy.back().mType == Mesh::T_Null)
+         {
+            skinsCopy.pop_back();
+            --obj.numMeshes;
+         }
+         // Only add object if we have meshes
+         if (obj.numMeshes > 0)
+         {
+            objects.push_back(obj);
+            ++numSkinObjects;
+         }
+      }
+
+      // Write back the repacked skins into the tail, then shrink away any unused remainder.
+      const size_t newSize = numMeshes + skinsCopy.size();
+      for (size_t i = 0; i < skinsCopy.size(); ++i)
+      {
+         meshes[numMeshes + i] = std::move(skinsCopy[i]);
+      }
+      
+      meshes.resize(newSize);
+
+      // If only one subshape, keep parity with old behavior.
+      if (subshapes.size() == 1)
+      {
+         subshapes[0].numObjects += int(numSkinObjects);
+      }
+      
+      // Insert default base states for the new objects, and shift sequence state blocks.
+      if (numSkinObjects)
+      {
+         const size_t insertAt = oldNumObjects;
+         const uint32_t n = numSkinObjects;
+
+         const size_t oldSize = objectStates.size();
+         objectStates.resize(oldSize + n);
+
+         std::memmove(objectStates.data() + insertAt + n,
+                      objectStates.data() + insertAt,
+                      (oldSize - insertAt) * sizeof(ObjectState));
+
+         for (size_t i = 0; i < n; ++i)
+         {
+            objectStates[insertAt + i] = ObjectState(1.0f, 0, 0);
+         }
+         
+         for (auto& seq : sequences)
+         {
+            seq.baseObjectState += int(n);
+         }
+      }
    }
    
    template<typename T> static bool writeShape(Shape* shape, T& ds, uint32_t version)
@@ -591,14 +778,14 @@ struct IO
       
       if (mesh->mType == Mesh::T_Skin)
       {
-         skinData = new SkinData();
-         basicData = dynamic_cast<BasicData*>(skinData);
-         mesh->mData = skinData;
+         mesh->mData = std::make_shared<SkinData>();
+         skinData = (SkinData*)mesh->mData.get();
+         basicData = (BasicData*)mesh->mData.get();
       }
       else if (mesh->mType != Mesh::T_Decal)
       {
-         basicData = new BasicData();
-         mesh->mData = basicData;
+         mesh->mData = std::make_shared<BasicData>();
+         basicData = (BasicData*)mesh->mData.get();
       }
       
       if (basicData)
@@ -754,8 +941,8 @@ struct IO
       }
       else if (mesh->mType == Mesh::T_Decal)
       {
-         DecalData* decalData = new DecalData;
-         mesh->mData = decalData;
+         mesh->mData = std::make_shared<DecalData>();
+         DecalData* decalData = (DecalData*)mesh->mData.get();
          
          ds.read(sz);
          decalData->primitives.resize(sz);
@@ -794,8 +981,8 @@ struct IO
       }
       else if (mesh->mType == Mesh::T_Sorted)
       {
-         SortedData* sortedData = new SortedData;
-         mesh->mData = sortedData;
+         mesh->mData = std::make_shared<SortedData>();
+         SortedData* sortedData = (SortedData*)mesh->mData.get();
          
          ds.read(sz);
          sortedData->clusters.resize(sz);
@@ -825,6 +1012,8 @@ struct IO
          
          ds.readCheck();
       }
+      
+      return true;
    }
    
    template<typename T> static bool writeMesh(Mesh* mesh, Shape* shape, T& ds, uint32_t version)
