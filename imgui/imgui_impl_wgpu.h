@@ -107,7 +107,7 @@ const char* ImGui_ImplWGPU_GetAdapterTypeName(WGPUAdapterType type);
 #if defined(IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
 const char* ImGui_ImplWGPU_GetDeviceLostReasonName(WGPUDeviceLostReason type);
 const char* ImGui_ImplWGPU_GetErrorTypeName(WGPUErrorType type);
-#elif defined(IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
+#elif defined(IMGUI_IMPL_WEBGPU_BACKEND_WGPU) && !defined(WGPU_NATIVE)
 const char* ImGui_ImplWGPU_GetLogLevelName(WGPULogLevel level);
 #endif
 

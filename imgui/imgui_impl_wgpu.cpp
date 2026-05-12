@@ -65,11 +65,11 @@
 #error Emscripten <4.0.10 with '-sUSE_WEBGPU=1' is not supported anymore.
 #endif
 
-#if defined IMGUI_IMPL_WEBGPU_BACKEND_DAWN || defined IMGUI_IMPL_WEBGPU_BACKEND_WGVK
-// Dawn renamed WGPUProgrammableStageDescriptor to WGPUComputeState (see: https://github.com/webgpu-native/webgpu-headers/pull/413)
-// Using type alias until WGPU adopts the same naming convention (#8369)
-using WGPUProgrammableStageDescriptor = WGPUComputeState;
-#endif
+struct ImGui_ImplWGPU_ShaderStage
+{
+    WGPUShaderModule module = nullptr;
+    WGPUStringView entryPoint = { nullptr, WGPU_STRLEN };
+};
 
 // Dear ImGui prototypes from imgui_internal.h
 extern ImGuiID ImHashData(const void* data_p, size_t data_size, ImU32 seed);
@@ -316,7 +316,17 @@ static void SafeRelease(FrameResources& res)
     SafeRelease(res.VertexBufferHost);
 }
 
-static WGPUProgrammableStageDescriptor ImGui_ImplWGPU_CreateShaderModuleWGSL(const char* wgsl_source)
+static constexpr WGPUStringView ImGui_ImplWGPU_StringView(const char* str)
+{
+    return { str, WGPU_STRLEN };
+}
+
+static WGPUOptionalBool ImGui_ImplWGPU_OptionalBool(bool value)
+{
+    return value ? WGPUOptionalBool_True : WGPUOptionalBool_False;
+}
+
+static ImGui_ImplWGPU_ShaderStage ImGui_ImplWGPU_CreateShaderModuleWGSL(const char* wgsl_source)
 {
     ImGui_ImplWGPU_Data* bd = ImGui_ImplWGPU_GetBackendData();
     IM_UNUSED(bd);
@@ -343,11 +353,11 @@ static WGPUProgrammableStageDescriptor ImGui_ImplWGPU_CreateShaderModuleWGSL(con
     pop_cb.userdata1 = &validation_error;
     wgpuDevicePopErrorScope(bd->wgpuDevice, pop_cb);
 
-    WGPUProgrammableStageDescriptor stage_desc = {};
+    ImGui_ImplWGPU_ShaderStage stage_desc = {};
     if (module && !validation_error)
     {
         stage_desc.module = module;
-        stage_desc.entryPoint = { "main", WGPU_STRLEN };
+        stage_desc.entryPoint = ImGui_ImplWGPU_StringView("main");
     }
     else if (module)
     {
@@ -356,7 +366,7 @@ static WGPUProgrammableStageDescriptor ImGui_ImplWGPU_CreateShaderModuleWGSL(con
     return stage_desc;
 }
 
-static WGPUProgrammableStageDescriptor ImGui_ImplWGPU_CreateShaderModuleSPIRV(const void* spirv_binary, size_t spirv_length)
+static ImGui_ImplWGPU_ShaderStage ImGui_ImplWGPU_CreateShaderModuleSPIRV(const void* spirv_binary, size_t spirv_length)
 {
     ImGui_ImplWGPU_Data* bd = ImGui_ImplWGPU_GetBackendData();
 
@@ -368,10 +378,10 @@ static WGPUProgrammableStageDescriptor ImGui_ImplWGPU_CreateShaderModuleSPIRV(co
     WGPUShaderModuleDescriptor desc = {};
     desc.nextInChain = (WGPUChainedStruct*)&spirv_desc;
 
-    WGPUProgrammableStageDescriptor stage_desc = {};
+    ImGui_ImplWGPU_ShaderStage stage_desc = {};
     stage_desc.module = wgpuDeviceCreateShaderModule(bd->wgpuDevice, &desc);
 
-    stage_desc.entryPoint = { "main", WGPU_STRLEN };
+    stage_desc.entryPoint = ImGui_ImplWGPU_StringView("main");
     return stage_desc;
 }
 
@@ -491,14 +501,11 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data, WGPURenderPassEncoder 
         SafeRelease(fr->VertexBufferHost);
         fr->VertexBufferSize = draw_data->TotalVtxCount + 5000;
 
-        WGPUBufferDescriptor vb_desc =
-        {
-            nullptr,
-            { "Dear ImGui Vertex buffer", WGPU_STRLEN, },
-            WGPUBufferUsage_CopyDst | WGPUBufferUsage_Vertex,
-            MEMALIGN(fr->VertexBufferSize * sizeof(ImDrawVert), 4),
-            false
-        };
+        WGPUBufferDescriptor vb_desc = {};
+        vb_desc.label = ImGui_ImplWGPU_StringView("Dear ImGui Vertex buffer");
+        vb_desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_Vertex;
+        vb_desc.size = MEMALIGN(fr->VertexBufferSize * sizeof(ImDrawVert), 4);
+        vb_desc.mappedAtCreation = false;
         fr->VertexBuffer = wgpuDeviceCreateBuffer(bd->wgpuDevice, &vb_desc);
         if (!fr->VertexBuffer)
             return;
@@ -515,14 +522,11 @@ void ImGui_ImplWGPU_RenderDrawData(ImDrawData* draw_data, WGPURenderPassEncoder 
         SafeRelease(fr->IndexBufferHost);
         fr->IndexBufferSize = draw_data->TotalIdxCount + 10000;
 
-        WGPUBufferDescriptor ib_desc =
-        {
-            nullptr,
-            { "Dear ImGui Index buffer", WGPU_STRLEN, },
-            WGPUBufferUsage_CopyDst | WGPUBufferUsage_Index,
-            MEMALIGN(fr->IndexBufferSize * sizeof(ImDrawIdx), 4),
-            false
-        };
+        WGPUBufferDescriptor ib_desc = {};
+        ib_desc.label = ImGui_ImplWGPU_StringView("Dear ImGui Index buffer");
+        ib_desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_Index;
+        ib_desc.size = MEMALIGN(fr->IndexBufferSize * sizeof(ImDrawIdx), 4);
+        ib_desc.mappedAtCreation = false;
         fr->IndexBuffer = wgpuDeviceCreateBuffer(bd->wgpuDevice, &ib_desc);
         if (!fr->IndexBuffer)
             return;
@@ -648,7 +652,7 @@ void ImGui_ImplWGPU_UpdateTexture(ImTextureData* tex)
 
         // Create texture
         WGPUTextureDescriptor tex_desc = {};
-        tex_desc.label = { "Dear ImGui Texture", WGPU_STRLEN };
+        tex_desc.label = ImGui_ImplWGPU_StringView("Dear ImGui Texture");
         tex_desc.dimension = WGPUTextureDimension_2D;
         tex_desc.size.width = tex->Width;
         tex_desc.size.height = tex->Height;
@@ -709,14 +713,11 @@ void ImGui_ImplWGPU_UpdateTexture(ImTextureData* tex)
 static void ImGui_ImplWGPU_CreateUniformBuffer()
 {
     ImGui_ImplWGPU_Data* bd = ImGui_ImplWGPU_GetBackendData();
-    WGPUBufferDescriptor ub_desc =
-    {
-        nullptr,
-        { "Dear ImGui Uniform buffer", WGPU_STRLEN, },
-        WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform,
-        MEMALIGN(sizeof(Uniforms), 16),
-        false
-    };
+    WGPUBufferDescriptor ub_desc = {};
+    ub_desc.label = ImGui_ImplWGPU_StringView("Dear ImGui Uniform buffer");
+    ub_desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform;
+    ub_desc.size = MEMALIGN(sizeof(Uniforms), 16);
+    ub_desc.mappedAtCreation = false;
     bd->renderResources.Uniforms = wgpuDeviceCreateBuffer(bd->wgpuDevice, &ub_desc);
 }
 
@@ -769,24 +770,22 @@ bool ImGui_ImplWGPU_CreateDeviceObjects()
     graphics_pipeline_desc.layout = wgpuDeviceCreatePipelineLayout(bd->wgpuDevice, &layout_desc);
 
     // Create the vertex shader
-    WGPUProgrammableStageDescriptor vertex_shader_desc = ImGui_ImplWGPU_CreateShaderModuleWGSL(__shader_vert_wgsl);
+    ImGui_ImplWGPU_ShaderStage vertex_shader_desc = ImGui_ImplWGPU_CreateShaderModuleWGSL(__shader_vert_wgsl);
     if (!vertex_shader_desc.module) vertex_shader_desc = ImGui_ImplWGPU_CreateShaderModuleSPIRV(__shader_vert_spirv, sizeof(__shader_vert_spirv));
     graphics_pipeline_desc.vertex.module = vertex_shader_desc.module;
     graphics_pipeline_desc.vertex.entryPoint = vertex_shader_desc.entryPoint;
 
     // Vertex input configuration
-    WGPUVertexAttribute attribute_desc[] =
-    {
-#if defined IMGUI_IMPL_WEBGPU_BACKEND_DAWN || defined IMGUI_IMPL_WEBGPU_BACKEND_WGVK
-        { nullptr, WGPUVertexFormat_Float32x2, (uint64_t)offsetof(ImDrawVert, pos), 0 },
-        { nullptr, WGPUVertexFormat_Float32x2, (uint64_t)offsetof(ImDrawVert, uv),  1 },
-        { nullptr, WGPUVertexFormat_Unorm8x4,  (uint64_t)offsetof(ImDrawVert, col), 2 },
-#else
-        { WGPUVertexFormat_Float32x2, (uint64_t)offsetof(ImDrawVert, pos), 0 },
-        { WGPUVertexFormat_Float32x2, (uint64_t)offsetof(ImDrawVert, uv),  1 },
-        { WGPUVertexFormat_Unorm8x4,  (uint64_t)offsetof(ImDrawVert, col), 2 },
-#endif
-    };
+    WGPUVertexAttribute attribute_desc[3] = {};
+    attribute_desc[0].format = WGPUVertexFormat_Float32x2;
+    attribute_desc[0].offset = (uint64_t)offsetof(ImDrawVert, pos);
+    attribute_desc[0].shaderLocation = 0;
+    attribute_desc[1].format = WGPUVertexFormat_Float32x2;
+    attribute_desc[1].offset = (uint64_t)offsetof(ImDrawVert, uv);
+    attribute_desc[1].shaderLocation = 1;
+    attribute_desc[2].format = WGPUVertexFormat_Unorm8x4;
+    attribute_desc[2].offset = (uint64_t)offsetof(ImDrawVert, col);
+    attribute_desc[2].shaderLocation = 2;
 
     WGPUVertexBufferLayout buffer_layouts[1];
     buffer_layouts[0].arrayStride = sizeof(ImDrawVert);
@@ -798,7 +797,7 @@ bool ImGui_ImplWGPU_CreateDeviceObjects()
     graphics_pipeline_desc.vertex.buffers = buffer_layouts;
 
     // Create the pixel shader
-    WGPUProgrammableStageDescriptor pixel_shader_desc = ImGui_ImplWGPU_CreateShaderModuleWGSL(__shader_frag_wgsl);
+    ImGui_ImplWGPU_ShaderStage pixel_shader_desc = ImGui_ImplWGPU_CreateShaderModuleWGSL(__shader_frag_wgsl);
     if (!pixel_shader_desc.module)  pixel_shader_desc = ImGui_ImplWGPU_CreateShaderModuleSPIRV(__shader_frag_spirv, sizeof(__shader_frag_spirv));
 
     // Create the blending setup
@@ -826,7 +825,7 @@ bool ImGui_ImplWGPU_CreateDeviceObjects()
     // Create depth-stencil State
     WGPUDepthStencilState depth_stencil_state = {};
     depth_stencil_state.format = bd->depthStencilFormat;
-    depth_stencil_state.depthWriteEnabled = WGPUOptionalBool_False;
+    depth_stencil_state.depthWriteEnabled = ImGui_ImplWGPU_OptionalBool(false);
     depth_stencil_state.depthCompare = WGPUCompareFunction_Always;
     depth_stencil_state.stencilFront.compare = WGPUCompareFunction_Always;
     depth_stencil_state.stencilFront.failOp = WGPUStencilOperation_Keep;
@@ -995,7 +994,7 @@ bool ImGui_ImplWGPU_IsSurfaceStatusError(WGPUSurfaceGetCurrentTextureStatus stat
 #if defined(IMGUI_IMPL_WEBGPU_BACKEND_DAWN) || defined(IMGUI_IMPL_WEBGPU_BACKEND_WGVK)
     return (status == WGPUSurfaceGetCurrentTextureStatus_Error);
 #else
-    return (status == WGPUSurfaceGetCurrentTextureStatus_OutOfMemory || status == WGPUSurfaceGetCurrentTextureStatus_DeviceLost);
+    return (status == WGPUSurfaceGetCurrentTextureStatus_Error);
 #endif
 }
 
@@ -1032,7 +1031,7 @@ const char* ImGui_ImplWGPU_GetDeviceLostReasonName(WGPUDeviceLostReason type)
     default: return "Unknown";
     }
 }
-#elif !defined(__EMSCRIPTEN__)
+#elif !defined(__EMSCRIPTEN__) && !defined(WGPU_NATIVE)
 const char* ImGui_ImplWGPU_GetLogLevelName(WGPULogLevel level)
 {
     switch (level)
@@ -1088,7 +1087,7 @@ void ImGui_ImplWGPU_DebugPrintAdapterInfo(const WGPUAdapter& adapter)
 
 #ifndef __EMSCRIPTEN__
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(WGPU_NATIVE)
 // MacOS specific: is necessary to compile with "-x objective-c++" flags
 // (e.g. using cmake: set_source_files_properties(${IMGUI_DIR}/backends/imgui_impl_wgpu.cpp PROPERTIES COMPILE_FLAGS "-x objective-c++") )
 #include <TargetConditionals.h>
@@ -1102,7 +1101,7 @@ WGPUSurface ImGui_ImplWGPU_CreateWGPUSurfaceHelper(ImGui_ImplWGPU_CreateSurfaceI
 {
     WGPUSurfaceDescriptor surface_descriptor = {};
     WGPUSurface surface = {};
-#if defined(__APPLE__) && TARGET_OS_OSX
+#if defined(__APPLE__) && TARGET_OS_OSX && !defined(WGPU_NATIVE)
     if (strcmp(info->System, "cocoa") == 0)
     {
         IM_ASSERT(info->RawWindow != nullptr);

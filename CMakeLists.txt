@@ -77,13 +77,21 @@ set(TARGET_HEADER_SEARCH_PATHS
 	${TARGET_HEADER_SEARCH_PATHS}
 	${WGPU_NATIVE_PATH}/ffi/webgpu-headers
 	)
-set(LIBRARY_SEARCH_PATHS ${LIBRARY_SEARCH_PATHS} ${WGPU_NATIVE_PATH}/target/debug)
+set(LIBRARY_SEARCH_PATHS
+    ${LIBRARY_SEARCH_PATHS}
+    ${WGPU_NATIVE_PATH}/target/debug
+    ${WGPU_NATIVE_PATH}/target/release
+)
 
 find_library(WEBGPU_NATIVE_LIB_PATH
-    NAMES libwgpu_native.a libwgpu_native.lib
+    NAMES wgpu_native libwgpu_native
     PATHS ${LIBRARY_SEARCH_PATHS}
-    NAMES_PER_DIR
+    NO_DEFAULT_PATH
 )
+
+if (IS_DIRECTORY "${WEBGPU_NATIVE_LIB_PATH}" OR NOT WEBGPU_NATIVE_LIB_PATH)
+    set(WEBGPU_NATIVE_LIB_PATH "${WGPU_NATIVE_PATH}/target/debug/libwgpu_native.a" CACHE FILEPATH "Path to wgpu-native library" FORCE)
+endif()
 
 set(TARGET_LIBS ${TARGET_LIBS} ${WEBGPU_NATIVE_LIB_PATH})
 else()
@@ -127,4 +135,3 @@ if(APPLE)
         ${QUARTZCORE_LIBRARY}
     )
 endif()
-

@@ -264,7 +264,9 @@ struct Sequence
       Cyclic          = 0x0010,
       MakePath        = 0x0020,
       IFLInit         = 0x0040,
-      HasTranslucency = 0x0080
+      HasTranslucency = 0x0080,
+      
+      AnyScale = UniformScale | AlignedScale | ArbitraryScale
    };
    
    int nameIndex;
@@ -738,13 +740,17 @@ struct ThreadTransitionState
    
    uint32_t oldSequenceIdx;
    float oldPos;
+   
+   ThreadTransitionState() : duration(0), pos(0), direction(0), targetScale(0), oldSequenceIdx(0), oldPos(0) {;}
 };
 
 // NOTE: we try and go with what torque does, since
-// animation behavior is gets VERY specific.
+// animation behavior gets VERY specific.
 class Thread
 {
+public:
    // General
+   int32_t index;
    int32_t priority;
    Shape* shape;
    
@@ -754,9 +760,15 @@ class Thread
    float timeScale;
    
    // Keyframe blend
-   int32_t keyA;
-   int32_t keyB;
-   float keyPos;
+   struct KeyFrameInfo
+   {
+      int32_t keyA;
+      int32_t keyB;
+      float keyPos;
+      
+      KeyFrameInfo() : keyA(-1), keyB(-1), keyPos(0) {;}
+   };
+   KeyFrameInfo keyInfo;
    
    // State
    bool playing;
@@ -767,11 +779,16 @@ class Thread
    ThreadTransitionState transitionState;
    ThreadPath path; ///< Path for triggers
    
-   Thread()
+   Thread() : priority(0), shape(nullptr), sequenceIdx(-1), pos(0), timeScale(0), playing(false), transitioning(false), noBlend(false), makePath(false)
    {
    }
 };
 
+struct ArbitraryScale
+{
+   Quat16 rot;
+   slm::vec3 pos;
+};
 
 class ShapeViewer;
 
@@ -863,6 +880,53 @@ public:
    Sequence* getSequence(const std::string_view& name);
    
    bool checkSkip(int meshNumber, int currentObject, int currentDecal, int skipDetailLevel);
+   
+   inline slm::vec3 getSequenceTranslation(Dts3::Sequence& sequence, int32_t frame, int32_t rotIndex)
+   {
+      // NOTE: this should be stored [n1f1 n1f2 n2f1 n2f2 ...]
+      return mNodeTranslations[sequence.baseRot + (sequence.numKeyFrames * rotIndex) + frame];
+   }
+   
+   inline Quat16 getSequenceRotation(Dts3::Sequence& sequence, int32_t frame, int32_t rotIndex)
+   {
+      // NOTE: this should be stored [n1f1 n1f2 n2f1 n2f2 ...]
+      return mNodeRotations[sequence.baseRot + (sequence.numKeyFrames * rotIndex) + frame];
+   }
+   
+   inline float getSequenceUniformScale(Dts3::Sequence& sequence, int32_t frame, int32_t rotIndex)
+   {
+      // NOTE: this should be stored [n1f1 n1f2 n2f1 n2f2 ...]
+      return mNodeUniformScales[sequence.baseScale + (sequence.numKeyFrames * rotIndex) + frame];
+   }
+   
+   inline slm::vec3 getSequenceAlignedScale(Dts3::Sequence& sequence, int32_t frame, int32_t rotIndex)
+   {
+      // NOTE: this should be stored [n1f1 n1f2 n2f1 n2f2 ...]
+      return mNodeAlignedScales[sequence.baseScale + (sequence.numKeyFrames * rotIndex) + frame];
+   }
+   
+   inline struct ArbitraryScale getSequenceArbitraryScale(Dts3::Sequence& sequence, int32_t frame, int32_t scaleIndex)
+   {
+      // NOTE: this should be stored [n1f1 n1f2 n2f1 n2f2 ...]
+      struct ArbitraryScale outScale;
+      const int32_t realFrame = sequence.baseScale + (sequence.numKeyFrames * scaleIndex) + frame;
+      outScale.pos = mNodeArbitraryScaleFactors[realFrame];
+      outScale.rot = mNodeArbitraryScaleRotations[realFrame];
+      return outScale;
+   }
+   
+   inline const Dts3::DecalState& getSequenceDecalState(Dts3::Sequence& sequence, int32_t frame, int32_t decalIndex)
+   {
+      // NOTE: this should be stored [d1f1 d1f2 d2f1 d2f2 ...]
+      return mDecalStates[sequence.baseDecalState + (sequence.numKeyFrames * decalIndex) + frame];
+   }
+   
+   inline const Dts3::ObjectState& getSequenceObjectState(Dts3::Sequence& sequence, int32_t frame, int32_t objIndex)
+   {
+      // NOTE: this should be stored [o1f1 o1f2 o2f1 o2f2 ...]
+      return mObjectStates[sequence.baseObjectState + (sequence.numKeyFrames * objIndex) + frame];
+   }
+   
    
    virtual bool read(MemRStream& stream);
 };

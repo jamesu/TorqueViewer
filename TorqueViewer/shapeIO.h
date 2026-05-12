@@ -1220,15 +1220,15 @@ struct SplitStream
    // For array types
    template<class T, int N> inline bool read( T (&value)[N] )
    {
-      if (sizeof(T) == 32)
+      if (sizeof(T) == 4)
       {
          return buffer32.read(sizeof(T) * N, value);
       }
-      else if (sizeof(T) == 16)
+      else if (sizeof(T) == 2)
       {
          return buffer16.read(sizeof(T) * N, value);
       }
-      else if (sizeof(T) == 8)
+      else if (sizeof(T) == 1)
       {
          return buffer8.read(sizeof(T) * N, value);
       }
@@ -1279,15 +1279,15 @@ struct SplitStream
    // For array types
    template<class T, int N> inline bool write( T (&value)[N] )
    {
-      if (sizeof(T) == 32)
+      if (sizeof(T) == 4)
       {
          return buffer32.write(sizeof(T) * N, value);
       }
-      else if (sizeof(T) == 16)
+      else if (sizeof(T) == 2)
       {
          return buffer16.write(sizeof(T) * N, value);
       }
-      else if (sizeof(T) == 8)
+      else if (sizeof(T) == 1)
       {
          return buffer8.write(sizeof(T) * N, value);
       }
@@ -1301,15 +1301,15 @@ struct SplitStream
    // For normal scalar types
    template<typename T> inline bool write(T &value)
    {
-      if (sizeof(T) == 32)
+      if (sizeof(T) == 4)
       {
          return buffer32.write(value);
       }
-      else if (sizeof(T) == 16)
+      else if (sizeof(T) == 2)
       {
          return buffer16.write(value);
       }
-      else if (sizeof(T) == 8)
+      else if (sizeof(T) == 1)
       {
          return buffer8.write(value);
       }

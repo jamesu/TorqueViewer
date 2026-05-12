@@ -31,6 +31,7 @@
 #include <iostream>
 #include <fstream>
 #include <unordered_map>
+#include <numeric>
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
@@ -178,6 +179,7 @@ public:
    
    bool initVB;
    bool useShared;
+   bool mApplyScaleTransforms;
    
    slm::mat4 mProjectionMatrix;
    slm::mat4 mModelMatrix;
@@ -389,6 +391,9 @@ public:
    struct RuntimeIflMaterialInfo
    {
       int32_t mFrame;
+      int32_t mStartFrame;
+      uint32_t mIflMaterial;
+      float mDuration; // 1.0 / 30 * total
    };
    
    struct RuntimeDecalInfo
@@ -419,24 +424,86 @@ public:
       RuntimeDetailInfo(uint32_t so, uint32_t nro) : startRenderObject(so), numRenderObjects(nro) {;}
    };
    
+   struct RuntimeSubShapeInfo
+   {
+      enum Flags : uint8_t
+      {
+         TransformDirty = BIT(0),
+         VisDirty = BIT(1),
+         FrameDirty = BIT(2),
+         MatFrameDirty = BIT(3),
+         ThreadDirty = BIT(4),
+         // NOTE: these are used in TGE shapes only
+         IflDirty = BIT(5),
+         DecalDirty = BIT(6),
+         //
+         AllDirty = TransformDirty | VisDirty | FrameDirty | MatFrameDirty | ThreadDirty | IflDirty | DecalDirty
+      };
+      
+      uint8_t dirtyFlags;
+      uint32_t subShapeIndex;
+      
+      RuntimeSubShapeInfo() : dirtyFlags(0) {;}
+      inline bool testFlags(uint8_t flag) { return (dirtyFlags & flag) != 0; }
+      inline void clearFlags(uint8_t flag) { dirtyFlags &= ~flag; }
+   };
+   
+   typedef void (*SetNodeTransformCallback)(ShapeViewer*, int32_t, slm::mat4&);
+   
+   struct NodeCallbackInfo
+   {
+      SetNodeTransformCallback* callback;
+      int32_t nodeIndex;
+   };
+   
    std::vector<Dts3::Thread> mThreads;
+   std::vector<uint32_t> mSortedThreads;
+   std::vector<uint32_t> mTransitionThreads; // base threads that are transitioning
+   
+   struct TransitionSets
+   {
+      IntegerSet rotationNodes;
+      IntegerSet translationNodes;
+      IntegerSet scaleNodes;
+   };
+   
+   TransitionSets mTransitionSets;
+   int32_t mGroundThreadIdx;
    
    Dts3::Shape* mShape;
    
-   std::vector<slm::mat4> mNodeTransforms; // Current transform list
+   std::vector<slm::mat4> mLocalNodeTransforms; // Current transform list (minus parent)
+   std::vector<slm::mat4> mNodeTransforms; // Current transform list (including parent)
+   
+   // Working node animation values
    std::vector<slm::quat> mActiveRotations; // non-gl xfms
    std::vector<slm::vec4> mActiveTranslations; // non-gl xfms
-   std::vector<slm::vec3> mActiveScales; // non-gl xfms
+   std::vector<float> mActiveUniformScales; // non-gl xfms
+   std::vector<slm::vec3> mActiveAlignedScales; // non-gl xfms
+   std::vector<Dts3::ArbitraryScale> mActiveArbitraryScales; // non-gl xfms
    
+   // Derived states of shape objects
    std::vector<RuntimeMeshInfo> mRuntimeMeshInfos;
    std::vector<RuntimeObjectInfo> mRuntimeObjectInfos;
    std::vector<RuntimeIflMaterialInfo> mRuntimeIflMaterialInfos;
    std::vector<RuntimeDecalInfo> mRuntimeDecalInfos;
    std::vector<RuntimeDetailInfo> mRuntimeDetailInfos;
+   std::vector<RuntimeSubShapeInfo> mRuntimeSubShapeInfos;
+   std::vector<NodeCallbackInfo> mRuntimeNodeCallbacks;
+   std::vector<float> mIflFrameTimes; // this is per ifl
+   
+   // NOTE: these are thread references used to handle transitions
+   std::vector<int32_t> mNodeRotationThreads;
+   std::vector<int32_t> mNodeTranslationThreads;
+   std::vector<int32_t> mNodeScaleThreads;
    
    int32_t mDefaultMaterials;
    int32_t mAlwaysNode;
    int32_t mCurrentDetail;
+   uint32_t mTriggerStateFlags;
+   
+   std::vector<bool> mThreadActive;
+   uint32_t mBaseTextureTransform;
    
    template<typename T> struct FrameTexInfo
    {
@@ -472,7 +539,7 @@ public:
       uint32_t allocTransforms(uint32_t numTransforms)
       {
          uint32_t offset = memoryUsed;
-         memoryUsed += numTransforms;
+         memoryUsed += sizeof(T) * numTransforms;
          return offset;
       }
       
@@ -491,7 +558,7 @@ public:
             memset(updateMem, 0, (pow2Size * pow2Size) * sizeof(T));
             if (initialMem)
             {
-               memcpy(updateMem, initialMem, initialTransformSize * sizeof(T) * 16);
+               memcpy(updateMem, initialMem, initialTransformSize * sizeof(T));
             }
             memorySize = (pow2Size * pow2Size);
             
@@ -506,20 +573,29 @@ public:
          {
             if (initialMem)
             {
-               memcpy(updateMem, initialMem, initialTransformSize * sizeof(T) * 16);
+               memcpy(updateMem, initialMem, initialTransformSize * sizeof(T));
             }
             GFXUpdateCustomTextureAligned(texID, updateMem);
          }
       }
    };
    
-   typedef FrameTexInfo<float> TransformTexInfo;
-   typedef FrameTexInfo<uint32_t> TransformIndexTexInfo;
+   struct Matrix43
+   {
+      slm::vec4 r1;
+      slm::vec4 r2;
+      slm::vec4 r3;
+   };
    
+   struct LookupRegister
+   {
+      uint32_t vals[4];
+   };
+   
+   typedef FrameTexInfo<Matrix43> TransformTexInfo;
+   
+   // Transform tex: 4x3 matrix 3 texels per matrix
    TransformTexInfo nodeMeshTransformsTex;
-   TransformIndexTexInfo nodeMeshIndexTex;
-   TransformTexInfo nodeInstTransformsTex;
-   
    
    ShapeViewer(ResManager* res)
    {
@@ -536,12 +612,47 @@ public:
    void clear()
    {
       nodeMeshTransformsTex.reset();
-      nodeMeshIndexTex.reset();
-      nodeInstTransformsTex.reset();
       
       clearVertexBuffer();
       clearTextures();
       clearRender();
+   }
+   
+   size_t getMaxSkinnedTransforms()
+   {
+      size_t minMeshTransforms = 1 + mShape->mNodes.size();
+      
+      // We can have the same node distributed across multiple meshes,
+      // so check the mesh counts!
+      for (Dts3::SubShape subShape : mShape->mSubshapes)
+      {
+         size_t subShapeTransforms = 0;
+         
+         // Consider all objects in the subshape
+         for (uint32_t i=0; i<subShape.numObjects; i++)
+         {
+            Dts3::Object& obj = mShape->mObjects[subShape.firstObject + i];
+            
+            // Check all the meshes in this object
+            for (uint32_t mi=0; mi<obj.numMeshes; mi++)
+            {
+               Dts3::Mesh& m = mShape->mMeshes[mi];
+               if (m.mType == Dts3::Mesh::T_Skin)
+               {
+                  Dts3::SkinData* skinData = m.getSkinData();
+                  subShapeTransforms += skinData->nodeTransforms.size() + 1;
+               }
+               else if (m.mType != Dts3::Mesh::T_Null)
+               {
+                  subShapeTransforms++;
+               }
+            }
+         }
+         
+         minMeshTransforms = std::max<size_t>(minMeshTransforms, subShapeTransforms);
+      }
+      
+      return minMeshTransforms;
    }
    
    void initRender()
@@ -551,11 +662,13 @@ public:
       if (mShape == NULL)
          return;
       
+      mBaseTextureTransform = 0;
       mRuntimeMeshInfos.resize(mShape->mMeshes.size());
       mRuntimeObjectInfos.resize(mShape->mObjects.size());
       mRuntimeIflMaterialInfos.resize(mShape->mIflMaterials.size());
       mRuntimeDecalInfos.resize(mShape->mDecals.size());
       mRuntimeDetailInfos.resize(mShape->mDetailLevels.size());
+      mRuntimeSubShapeInfos.resize(mShape->mSubshapes.size());
       
       std::vector<slm::mat4> meshTransforms;
       std::vector<uint32_t> boneIndexes;
@@ -586,19 +699,13 @@ public:
       
       // Load base skin transforms texture
       nodeMeshTransformsTex.reset();
-      if (meshTransforms.size() > 0)
-      {
-         nodeMeshTransformsTex.allocTransforms(meshTransforms.size() * 16);
-         nodeMeshTransformsTex.ensureValid(meshTransforms.size(), (float*)meshTransforms.data());
-         
-         nodeMeshIndexTex.allocTransforms(boneIndexes.size());
-         nodeMeshIndexTex.ensureValid(boneIndexes.size(), boneIndexes.data());
-      }
       
-      // Alloc node transform texture for single instance
-      nodeInstTransformsTex.reset();
-      nodeInstTransformsTex.allocTransforms(mShape->mNodes.size() * 16);
-      nodeInstTransformsTex.ensureValid(0, NULL);
+      size_t maxTransforms = getMaxSkinnedTransforms();
+      if (maxTransforms > 0)
+      {
+         mBaseTextureTransform = nodeMeshTransformsTex.allocTransforms(maxTransforms);
+         nodeMeshTransformsTex.ensureValid(maxTransforms, NULL);
+      }
       
       initRenderMaterials();
    }
@@ -656,28 +763,402 @@ public:
    void clearRender()
    {
       nodeMeshTransformsTex.reset();
-      nodeMeshIndexTex.reset();
-      nodeInstTransformsTex.reset();
    }
    
    // Sequence Handling
    
+   template<typename T> void forEachSortedThread(T&& func)
+   {
+      for (uint32_t num : mSortedThreads)
+      {
+         if (mThreads[num].index < 0)
+            continue;
+         func(mThreads[num]);
+      }
+   }
+   
+   template<typename T> void forEachSortedThreadCheck(T&& func)
+   {
+      for (uint32_t num : mSortedThreads)
+      {
+         if (mThreads[num].index < 0)
+            continue;
+         if (!func(mThreads[num]))
+         {
+            return;
+         }
+      }
+   }
    
    uint32_t addThread()
    {
-      return 0;
+      // Re-use existing if possible
+      for (size_t i=0; i<mThreads.size(); i++)
+      {
+         if (mThreads[i].index < 0)
+         {
+            mThreads[i].index = (int32_t)i;
+            return (int32_t)i;
+         }
+      }
+      
+      Dts3::Thread thread;
+      thread.shape = mShape;
+      thread.index = mThreads.size();
+      mThreads.push_back(thread);
+      mSortedThreads.push_back(thread.index);
+      return (uint32_t)mThreads.size();
    }
    
-   void setThreadSequence(uint32_t idx, int32_t sequenceId)
+   static constexpr float kSequenceLoopEnd = 0.9999f;
+   
+   void setThreadSequence(uint32_t idx, int32_t sequenceIdx, float pos)
    {
+      Dts3::Thread& thread = mThreads[idx];
+      clearTransition(thread);
+      
+      if (sequenceIdx < 0)
+      {
+         thread.sequenceIdx = -1;
+         thread.priority = 0;
+         thread.makePath = false;
+         thread.path = Dts3::ThreadPath();
+      }
+      else
+      {
+         Dts3::Sequence& sequence = mShape->mSequences[sequenceIdx];
+         thread.sequenceIdx = sequenceIdx;
+         thread.pos = pos;
+         thread.priority = sequence.priority;
+         //thread.makePath = sequence.MakePath;
+         if (sequence.testFlags(Dts3::Sequence::Cyclic) &&
+             thread.pos > kSequenceLoopEnd)
+         {
+            thread.pos = kSequenceLoopEnd;
+         }
+         
+         selectKeyFrames(pos, sequence, thread.keyInfo);
+      }
+      
+   }
+   
+   void transitionToSequence(Dts3::Thread& thread, int32_t sequenceIdx, float pos, float duration, bool playing)
+   {
+      animateNodeSubtrees(false);
+      
+      transitionThreadToSequence(thread, sequenceIdx, pos, duration, playing);
+      setDirty(RuntimeSubShapeInfo::AllDirty);
+      mGroundThreadIdx = -1;
+      
+      updateScaleAnimatonState();
+      
+      Dts3::Sequence& seq = mShape->mSequences[thread.sequenceIdx];
+      mTransitionSets.rotationNodes |= thread.transitionState.oldRotations;
+      mTransitionSets.rotationNodes |= seq.mattersRot;
+      mTransitionSets.translationNodes |= thread.transitionState.oldTranslations;
+      mTransitionSets.translationNodes |= seq.mattersTranslation;
+      mTransitionSets.scaleNodes |= thread.transitionState.oldScales;
+      mTransitionSets.scaleNodes |= seq.mattersScale;
+      
+      auto itr = std::find(mTransitionThreads.begin(), mTransitionThreads.end(), thread.index);
+      if (itr == mTransitionThreads.end())
+      {
+         mTransitionThreads.push_back(thread.index);
+      }
+      
+      updateTransitions();
+   }
+   
+   void transitionThreadToSequence(Dts3::Thread& thread, int32_t sequenceIdx, float pos, float duration, bool playing)
+   {
+      
+   }
+   
+   void updateTransitions()
+   {
+      // NOTE: this basically updates the reference transform for the transitioning threads
+   }
+   
+   void selectKeyFrames(float pos, Dts3::Sequence& sequence, Dts3::Thread::KeyFrameInfo& outInfo)
+   {
+      // NOTE: This is vaguely similar to tribes 1 except the math is greatly simplified.
+      
+      if (sequence.testFlags(Dts3::Sequence::Cyclic))
+      {
+         float keyFrameFloat = pos * (float)sequence.numKeyFrames;
+         outInfo.keyPos = keyFrameFloat - (int)keyFrameFloat; // leave only fractional part
+         
+         outInfo.keyA = (int)keyFrameFloat;
+         outInfo.keyB = outInfo.keyA == (sequence.numKeyFrames-1) ? 0 : outInfo.keyA+1;
+      }
+      else
+      {
+         if (pos == 1.0f)
+         {
+            // Reached end
+            outInfo.keyPos = 0.0f;
+            outInfo.keyA = outInfo.keyB = sequence.numKeyFrames-1;
+         }
+         else
+         {
+            // Still playing, ends at numKeyFrames-1
+            float keyFrameFloat = pos * (float)(sequence.numKeyFrames-1);
+            outInfo.keyPos = keyFrameFloat - (int)keyFrameFloat;
+            outInfo.keyA = (int)keyFrameFloat;
+            outInfo.keyB = outInfo.keyA+1;
+         }
+      }
+   }
+   
+   void clearTransition(Dts3::Thread& thread)
+   {
+      if (!thread.transitioning)
+      {
+         return;
+      }
+      
+      // TODO
+      
+      setDirty(RuntimeSubShapeInfo::ThreadDirty);
    }
    
    void removeThread(uint32_t idx)
+   {
+      Dts3::Thread& thread = mThreads[idx];
+      clearTransition(thread);
+      
+      mThreads[idx].index = -1;
+      
+      setDirty(RuntimeSubShapeInfo::AllDirty);
+      updateScaleAnimatonState();
+      sortThreads(); // make sure order is consistent
+   }
+   
+   void animateSubshape(RuntimeSubShapeInfo& runtimeSubShape)
+   {
+      Dts3::SubShape& subShape = mShape->mSubshapes[runtimeSubShape.subShapeIndex];
+      
+      if (runtimeSubShape.testFlags(RuntimeSubShapeInfo::ThreadDirty))
+      {
+         sortThreads();
+      }
+      
+      if (runtimeSubShape.testFlags(RuntimeSubShapeInfo::IflDirty))
+      {
+         animateIfls();
+      }
+      
+      if (runtimeSubShape.testFlags(RuntimeSubShapeInfo::TransformDirty))
+      {
+         animateNodes(subShape);
+      }
+      
+      if (runtimeSubShape.testFlags(RuntimeSubShapeInfo::VisDirty))
+      {
+         animateVisibility(subShape);
+      }
+      
+      if (runtimeSubShape.testFlags(RuntimeSubShapeInfo::FrameDirty))
+      {
+         animateMeshFrame(subShape);
+      }
+      
+      if (runtimeSubShape.testFlags(RuntimeSubShapeInfo::MatFrameDirty))
+      {
+         animateMatFrame(subShape);
+      }
+      
+      if (runtimeSubShape.testFlags(RuntimeSubShapeInfo::DecalDirty))
+      {
+         animateDecals(subShape);
+      }
+      
+      runtimeSubShape.dirtyFlags = 0;
+   }
+   
+   void animate(Dts3::DetailLevel detailLevel)
+   {
+      if (detailLevel.subshape < 0)
+      {
+         return;
+      }
+      
+      RuntimeSubShapeInfo& runtimeSubShape = mRuntimeSubShapeInfos[detailLevel.subshape];
+      animateSubshape(runtimeSubShape);
+   }
+   
+   
+   void animateIfls()
+   {
+      for (RuntimeIflMaterialInfo& info : mRuntimeIflMaterialInfos)
+      {
+         Dts3::IflMaterial& iflInfo = mShape->mIflMaterials[info.mIflMaterial];
+         info.mFrame = 0;
+         forEachSortedThreadCheck([&](Dts3::Thread& thread){
+            Dts3::Sequence& seq = mShape->mSequences[thread.sequenceIdx];
+            // NOTE: mattersIfl basically applies for the entire sequence
+            // ALSO: only one thread can control an IFL at any time; basically think of it like
+            //       the thread just plays the ifl offset from toolBegin.
+            if (seq.mattersIfl.test(info.mIflMaterial))
+            {
+               int32_t firstFrame = iflInfo.firstFrame;
+               int32_t numFrames = iflInfo.numFrames;
+               float duration = info.mDuration;
+               
+               float time = (thread.pos * seq.duration) + seq.toolBegin;
+               if (time > duration && duration > 0.0f)
+               {
+                  time -= duration * (float)((int32_t) (time / duration)); // loop
+               }
+               
+               // Lookup frame t1 style
+               int32_t frameIdx = 0;
+               for (; frameIdx < numFrames-1 && time > mIflFrameTimes[firstFrame + frameIdx]; frameIdx++);
+               info.mFrame = frameIdx;
+               return false;
+            }
+            return true;
+         });
+      }
+      
+      clearDirty(RuntimeSubShapeInfo::IflDirty);
+   }
+   
+   void sortThreads()
+   {
+      std::sort(mSortedThreads.begin(), mSortedThreads.end(),
+                [&](size_t i, size_t j) {
+        Dts3::Thread const& a = mThreads[i];
+        Dts3::Thread const& b = mThreads[j];
+         Dts3::Sequence const& aSeq = mShape->mSequences[a.sequenceIdx];
+         Dts3::Sequence const& bSeq = mShape->mSequences[b.sequenceIdx];
+         
+         // inactive goes on end
+         if (a.index < 0)
+         {
+            return false;
+         }
+
+         const bool aBlend = aSeq.testFlags(Dts3::Sequence::Blend);
+         const bool bBlend = bSeq.testFlags(Dts3::Sequence::Blend);
+
+                    if (aBlend != bBlend)
+                        return !aBlend && bBlend;
+
+                    return a.priority > b.priority;
+                });
+      
+   }
+   
+   void setDirty(uint8_t mask)
+   {
+      for (RuntimeSubShapeInfo& info : mRuntimeSubShapeInfos)
+      {
+         info.dirtyFlags |= mask;
+      }
+   }
+   
+   void clearDirty(uint8_t mask)
+   {
+      for (RuntimeSubShapeInfo& info : mRuntimeSubShapeInfos)
+      {
+         info.dirtyFlags &= ~mask;
+      }
+   }
+   
+   void updateScaleAnimatonState()
+   {
+      // NOTE: this adds on a bunch of scale computations if enabled
+      forEachSortedThread([&](Dts3::Thread& thread){
+         if (thread.sequenceIdx >= 0)
+         {
+            Dts3::Sequence& seq = mShape->mSequences[thread.sequenceIdx];
+            if (seq.testFlags(Dts3::Sequence::AnyScale))
+            {
+               mApplyScaleTransforms = true;
+               return;
+            }
+         }
+      });
+      
+      mApplyScaleTransforms = false;
+   }
+   
+   float getThreadTime(Dts3::Thread& thread)
+   {
+      return thread.transitioning ? thread.transitionState.pos * thread.transitionState.duration :
+                                    thread.pos * mShape->mSequences[thread.sequenceIdx].duration;
+   }
+   
+   float getThreadPos(Dts3::Thread& thread)
+   {
+      return thread.transitioning ? thread.transitionState.pos :
+                                    thread.pos;
+   }
+   
+   float getThreadDuration(Dts3::Thread& thread)
+   {
+      return thread.transitioning ? thread.transitionState.duration : mShape->mSequences[thread.sequenceIdx].duration;
+   }
+   
+   float getThreadDurationScaled(Dts3::Thread& thread)
+   {
+      return getThreadDuration(thread) / fabs(thread.timeScale);
+   }
+   
+   void advanceThreadTime(Dts3::Thread& thread, float dt)
+   {
+      advanceThreadPos(thread, thread.timeScale * dt / getThreadDuration(thread));
+   }
+   
+   void advanceThreadPos(Dts3::Thread& thread, float pos)
    {
    }
    
    void advanceThreads(float dt)
    {
+      // General overview:
+      // -
+      
+      
+      for (Dts3::Thread& thread : mThreads)
+      {
+         if (mThreadActive[thread.index])
+         {
+            advanceThreadTime(thread, dt);
+         }
+      }
+
+   }
+   
+   void animateNodeSubtrees(bool force)
+   {
+      if (force)
+      {
+         setDirty(RuntimeSubShapeInfo::TransformDirty);
+      }
+      
+      for (RuntimeSubShapeInfo& runtimeShape : mRuntimeSubShapeInfos)
+      {
+         Dts3::SubShape& subShape = mShape->mSubshapes[runtimeShape.subShapeIndex];
+         animateNodes(subShape);
+         runtimeShape.clearFlags(RuntimeSubShapeInfo::TransformDirty);
+      }
+   }
+   
+   void animateAllSubtrees(bool force)
+   {
+      // NOTE: torque code has a bug here in that it confuses subshapes with nodes
+      if (force)
+      {
+         setDirty(RuntimeSubShapeInfo::AllDirty);
+      }
+      
+      for (RuntimeSubShapeInfo& runtimeShape : mRuntimeSubShapeInfos)
+      {
+         animateSubshape(runtimeShape);
+         runtimeShape.clearFlags(RuntimeSubShapeInfo::TransformDirty);
+      }
    }
    
    void updateTransformTexture()
@@ -685,9 +1166,271 @@ public:
       // TODO
    }
    
-   void animateNodes()
+   void animateNodes(Dts3::SubShape& subShape)
    {
+      // Basically we do this in order:
+      // - Resize temp storage to match current shape node count
+      // - Set all bits in (rot, trans, scale) bitsets
+      // - For all threads, clear node bits that are set by the sequences; stop at first blend thread
+      // - Overlap bitset with combo overlap of (x,y,z) pos masks
+      // - Clear callback and hands-off nodes (these get handled externally)
+      // - For the active subshape, extract default rotations and translations
+      // - Overlap rotBeenSet with hands-off, callback, and (x,y,z) pos masks
+      // - If scale is active, apply default scale
+      // - For each active thread, updaye rotation and translation; then scale (if active)
+      // - NOTE: interpolation is performed in both cases based on thread pos
+      // - Apply basic transforms unless hands-off is set for node
+      // - Apply scale transforms unless hands-off is set for node
+      // - Invoke node callbacks for nodes set
+      // - Apply blend tranaforms (basically: added on top)
+      // - Apply transition transforms to marked transition nodes
+      // - Apply final transform (based on parent node)
+      mNodeTransforms.resize(mShape->mNodes.size());
+      
       updateTransformTexture();
+   }
+   
+   void applyBlendSequence(Dts3::Thread& thread, const Dts3::SubShape& subShape)
+   {
+      
+   }
+   
+   void applyTransitionNodes(const Dts3::SubShape& subShape)
+   {
+      
+   }
+   
+   void animateVisibility(const Dts3::SubShape& subShape)
+   {
+      if (mRuntimeObjectInfos.empty())
+      {
+         return;
+      }
+      
+      IntegerSet checkSet;
+      checkSet.set();
+         
+      forEachSortedThread([&](Dts3::Thread& thread){
+         checkSet.sub(mShape->mSequences[thread.sequenceIdx].mattersVis);
+      });
+      
+      // NOTE: this is assuming objectStates starts with the base objects; also
+      // this is just for setting the initial state (it doesn't save storage space).
+      for (uint32_t i=subShape.firstDecal; i<subShape.firstDecal + subShape.numDecals; i++)
+      {
+         if (checkSet.test(i))
+         {
+            mRuntimeObjectInfos[i].mLastVis  = mShape->mObjectStates[i].vis;
+         }
+      }
+      
+      forEachSortedThread([&](Dts3::Thread& thread){
+         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+         
+         // NOTE: object states are stored as (frame, matFrame, vis) thus why we have to combine
+         // the state flags here
+         IntegerSet objMatters = sequence.mattersFrame;
+         objMatters |= sequence.mattersMatframe;
+         objMatters |= sequence.mattersVis;
+         
+         int32_t startObjectsMatters = objMatters.findFirst();
+         int32_t endObjectMatters = subShape.firstObject + subShape.numObjects;
+         if (startObjectsMatters >= 0)
+         {
+            int32_t objFrame = 0;
+            for (int32_t oi=startObjectsMatters; oi<endObjectMatters; oi = objMatters.findNext(oi))
+            {
+               if (oi < 0)
+               {
+                  break;
+               }
+               
+               if (!checkSet.test(oi) &&
+                   sequence.mattersVis.test(oi))
+               {
+                  float visStart = mShape->getSequenceObjectState(sequence, thread.keyInfo.keyA, objFrame).vis;
+                  float visEnd = mShape->getSequenceObjectState(sequence, thread.keyInfo.keyB, objFrame).vis;
+                  
+                  const float visRange = visEnd - visStart;
+                  if ((visRange * visRange) > 0.99f)
+                  {
+                     mRuntimeObjectInfos[oi].mLastVis = thread.keyInfo.keyPos < 0.5f ? visStart : visEnd;
+                  }
+                  else
+                  {
+                     mRuntimeObjectInfos[oi].mLastVis = ((1.0f - thread.keyInfo.keyPos) * visStart) + (thread.keyInfo.keyPos * visEnd);
+                  }
+                  
+                  checkSet.set(oi, true);
+               }
+            }
+         }
+      });
+   }
+   
+   void animateMeshFrame(const Dts3::SubShape& subShape)
+   {
+      if (mRuntimeObjectInfos.empty())
+      {
+         return;
+      }
+      
+      IntegerSet checkSet;
+      checkSet.set();
+      
+      forEachSortedThread([&](Dts3::Thread& thread){
+         checkSet.sub(mShape->mSequences[thread.sequenceIdx].mattersFrame);
+      });
+      
+      // NOTE: this is assuming objectStates starts with the base objects; also
+      // this is just for setting the initial state (it doesn't save storage space).
+      for (uint32_t i=subShape.firstDecal; i<subShape.firstDecal + subShape.numDecals; i++)
+      {
+         if (checkSet.test(i))
+         {
+            mRuntimeObjectInfos[i].mLastMeshframe  = mShape->mObjectStates[i].frame;
+         }
+      }
+      
+      forEachSortedThread([&](Dts3::Thread& thread){
+         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+         
+         // NOTE: object states are stored as (frame, matFrame, vis) thus why we have to combine
+         // the state flags here
+         IntegerSet objMatters = sequence.mattersFrame;
+         objMatters |= sequence.mattersMatframe;
+         objMatters |= sequence.mattersVis;
+         
+         int32_t startObjectsMatters = objMatters.findFirst();
+         int32_t endObjectMatters = subShape.firstObject + subShape.numObjects;
+         if (startObjectsMatters >= 0)
+         {
+            int32_t objFrame = 0;
+            for (int32_t oi=startObjectsMatters; oi<endObjectMatters; oi = objMatters.findNext(oi))
+            {
+               if (oi < 0)
+               {
+                  break;
+               }
+               
+               if (!checkSet.test(oi) &&
+                   sequence.mattersFrame.test(oi))
+               {
+                  int32_t keyNum = thread.keyInfo.keyPos < 0.5f ? thread.keyInfo.keyA : thread.keyInfo.keyB;
+                  int32_t meshFrame = mShape->getSequenceObjectState(sequence, keyNum, objFrame).frame;
+                  mRuntimeObjectInfos[oi].mLastMeshframe = meshFrame;
+                  checkSet.set(oi, true);
+               }
+            }
+         }
+      });
+   }
+   
+   void animateMatFrame(const Dts3::SubShape& subShape)
+   {
+      if (mRuntimeObjectInfos.empty())
+      {
+         return;
+      }
+      
+      IntegerSet checkSet;
+      checkSet.set();
+      
+      forEachSortedThread([&](Dts3::Thread& thread){
+         checkSet.sub(mShape->mSequences[thread.sequenceIdx].mattersMatframe);
+      });
+      
+      // NOTE: this is assuming objectStates starts with the base objects; also
+      // this is just for setting the initial state (it doesn't save storage space).
+      for (uint32_t i=subShape.firstDecal; i<subShape.firstDecal + subShape.numDecals; i++)
+      {
+         if (checkSet.test(i))
+         {
+            mRuntimeObjectInfos[i].mLastMatFrame  = mShape->mObjectStates[i].matFrame;
+         }
+      }
+      
+      forEachSortedThread([&](Dts3::Thread& thread){
+         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+         
+         // NOTE: object states are stored as (frame, matFrame, vis) thus why we have to combine
+         // the state flags here
+         IntegerSet objMatters = sequence.mattersFrame;
+         objMatters |= sequence.mattersMatframe;
+         objMatters |= sequence.mattersVis;
+         
+         int32_t startObjectsMatters = objMatters.findFirst();
+         int32_t endObjectMatters = subShape.firstObject + subShape.numObjects;
+         if (startObjectsMatters >= 0)
+         {
+            int32_t objFrame = 0;
+            for (int32_t oi=startObjectsMatters; oi<endObjectMatters; oi = objMatters.findNext(oi))
+            {
+               if (oi < 0)
+               {
+                  break;
+               }
+               
+               if (!checkSet.test(oi) &&
+                   sequence.mattersMatframe.test(oi))
+               {
+                  int32_t keyNum = thread.keyInfo.keyPos < 0.5f ? thread.keyInfo.keyA : thread.keyInfo.keyB;
+                  int32_t matFrame = mShape->getSequenceObjectState(sequence, keyNum, objFrame).matFrame;
+                  mRuntimeObjectInfos[oi].mLastMatFrame = matFrame;
+                  checkSet.set(oi, true);
+               }
+            }
+         }
+      });
+   }
+   
+   void animateDecals(const Dts3::SubShape& subShape)
+   {
+      if (mRuntimeDecalInfos.empty())
+      {
+         return;
+      }
+   
+      IntegerSet checkSet;
+      checkSet.set();
+      
+      forEachSortedThread([&](Dts3::Thread& thread){
+         checkSet.sub(mShape->mSequences[thread.sequenceIdx].mattersDecal);
+      });
+      
+      // NOTE: this is assuming decalStates starts with the base decals; also
+      // this is just for setting the initial frame (it doesn't save storage space).
+      for (uint32_t i=subShape.firstDecal; i<subShape.firstDecal + subShape.numDecals; i++)
+      {
+         if (checkSet.test(i))
+         {
+            mRuntimeDecalInfos[i].mFrame = mShape->mDecalStates[i].frame;
+         }
+      }
+      
+      forEachSortedThread([&](Dts3::Thread& thread){
+         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+         int32_t startDecalMatters = sequence.mattersDecal.findFirst();
+         int32_t endDecal = subShape.firstDecal + subShape.numDecals;
+         if (startDecalMatters >= 0)
+         {
+            int32_t decalFrame = 0;
+            for (int32_t dci=startDecalMatters; dci<endDecal; dci = sequence.mattersDecal.findNext(dci))
+            {
+               if (dci < 0)
+               {
+                  break;
+               }
+               
+               if (!checkSet.test(dci))
+               {
+                  int32_t keyNum = thread.keyInfo.keyPos < 0.5f ? thread.keyInfo.keyA : thread.keyInfo.keyB;
+                  mRuntimeDecalInfos[dci].mFrame = mShape->getSequenceDecalState(sequence, keyNum, decalFrame++).frame;
+                  checkSet.set(dci, true);
+               }
+            }
+         }
+      });
    }
    
    // Loading
@@ -701,7 +1444,7 @@ public:
       initShapeObjects();
       
       // Setup default pose for nodes
-      animateNodes();
+      animate(0);
    }
    
    void initShapeObjects()
@@ -1139,6 +1882,7 @@ public:
    {
       if (nodeIdx < 0)
          return;
+      
       
 #if 0
       slm::mat4 firstXfm = slm::inverse(mNodeTransforms[0]);

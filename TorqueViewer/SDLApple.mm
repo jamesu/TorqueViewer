@@ -16,7 +16,7 @@ extern "C"
 }
 
 #if defined(__APPLE__)
-void GFXSetCocoaWindow(SDL_Window* window, WGPUSurfaceDescriptorFromMetalLayer* s)
+void GFXSetCocoaWindow(SDL_Window* window, WGPUSurfaceSourceMetalLayer* s)
 {
    NSWindow *nsWindow = (__bridge NSWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
 
@@ -25,8 +25,7 @@ void GFXSetCocoaWindow(SDL_Window* window, WGPUSurfaceDescriptorFromMetalLayer* 
     [nsWindow.contentView setLayer : metalLayer];
 
     s->chain.next = 0;
-    s->chain.sType = WGPUSType_SurfaceDescriptorFromMetalLayer;
+    s->chain.sType = WGPUSType_SurfaceSourceMetalLayer;
     s->layer = metalLayer;
 }
 #endif
-

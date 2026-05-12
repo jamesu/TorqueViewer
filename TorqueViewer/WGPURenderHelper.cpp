@@ -52,6 +52,16 @@ extern "C"
 #else
 #include <webgpu/webgpu.h>
 #endif
+
+static constexpr WGPUStringView WGPUString(const char* str)
+{
+   return {str, WGPU_STRLEN};
+}
+
+static constexpr WGPUOptionalBool WGPUOptionalBoolFromBool(bool value)
+{
+   return value ? WGPUOptionalBool_True : WGPUOptionalBool_False;
+}
 }
 
 static inline size_t AlignSize(const size_t size, const uint16_t alignment)
@@ -292,7 +302,7 @@ static LineProgramInfo buildLineProgram()
    
    // Create the pipeline layout
    WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
-   pipelineLayoutDesc.label = "Pipeline Layout";
+   pipelineLayoutDesc.label = WGPUString("Pipeline Layout");
    pipelineLayoutDesc.bindGroupLayoutCount = 1;
    WGPUBindGroupLayout bindGroupLayouts[1] = {smState.commonUniformLayout};
    pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
@@ -336,7 +346,7 @@ static LineProgramInfo buildLineProgram()
    // Vertex state configuration
    WGPUVertexState vertexState = {};
    vertexState.module = smState.shaders["lineShader"];  // Loaded shader module
-   vertexState.entryPoint = "mainVert";          // Entry point of the vertex shader
+   vertexState.entryPoint = WGPUString("mainVert");          // Entry point of the vertex shader
    vertexState.bufferCount = 1;
    vertexState.buffers = &vertexBufferLayout;
    
@@ -348,7 +358,7 @@ static LineProgramInfo buildLineProgram()
    bindGroupLayoutEntry0.buffer.minBindingSize = sizeof(CommonUniformStruct);
    
    WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc0 = {};
-   bindGroupLayoutDesc0.label = "Uniform Bind Group Layout";
+   bindGroupLayoutDesc0.label = WGPUString("Uniform Bind Group Layout");
    bindGroupLayoutDesc0.entryCount = 1;
    bindGroupLayoutDesc0.entries = &bindGroupLayoutEntry0;
    
@@ -357,7 +367,7 @@ static LineProgramInfo buildLineProgram()
    // Fragment state
    WGPUFragmentState fragmentState = {};
    fragmentState.module = smState.shaders["lineShader"]; // Loaded fragment shader module
-   fragmentState.entryPoint = "mainFrag";           // Entry point of the fragment shader
+   fragmentState.entryPoint = WGPUString("mainFrag");           // Entry point of the fragment shader
    fragmentState.targetCount = 1;
    
    WGPUColorTargetState colorTargetState = {};
@@ -378,13 +388,13 @@ static LineProgramInfo buildLineProgram()
    WGPUMultisampleState multisampleState = {};
    multisampleState.count = 1;
    multisampleState.mask = ~0;
-   multisampleState.alphaToCoverageEnabled = false;
+   multisampleState.alphaToCoverageEnabled = WGPU_FALSE;
    
    // Depth stencil state
    // (NOTE: we need this even if we aren't using it)
    WGPUDepthStencilState depthStencilState = {};
    depthStencilState.format = WGPUTextureFormat_Depth32Float;      // Depth format
-   depthStencilState.depthWriteEnabled = false;                    // Enable depth writing
+   depthStencilState.depthWriteEnabled = WGPUOptionalBoolFromBool(false);                    // Enable depth writing
    depthStencilState.depthCompare = WGPUCompareFunction_Always;
    depthStencilState.stencilFront.compare = WGPUCompareFunction_Always;
    depthStencilState.stencilFront.failOp = WGPUStencilOperation_Keep;
@@ -399,7 +409,7 @@ static LineProgramInfo buildLineProgram()
    
    // Create the render pipeline descriptor
    WGPURenderPipelineDescriptor pipelineDesc = {};
-   pipelineDesc.label = "Render Pipeline";
+   pipelineDesc.label = WGPUString("Render Pipeline");
    pipelineDesc.layout = pipelineLayout;
    pipelineDesc.vertex = vertexState;
    pipelineDesc.primitive = primitiveState;
@@ -420,7 +430,7 @@ static TerrainProgramInfo buildTerrainProgram()
    
    // Create the pipeline layout
    WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
-   pipelineLayoutDesc.label = "Pipeline Layout";
+   pipelineLayoutDesc.label = WGPUString("Pipeline Layout");
    pipelineLayoutDesc.bindGroupLayoutCount = 2;
    WGPUBindGroupLayout bindGroupLayouts[2] = {smState.commonUniformLayout, smState.terrainTextureLayout};
    pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
@@ -428,23 +438,17 @@ static TerrainProgramInfo buildTerrainProgram()
    WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(smState.gpuDevice, &pipelineLayoutDesc);
    
    // Define the vertex buffer layout
-   WGPUVertexBufferLayout vertexBufferLayout = {};
-   vertexBufferLayout.arrayStride = 0;
-   vertexBufferLayout.stepMode = WGPUVertexStepMode_VertexBufferNotUsed;
-   vertexBufferLayout.attributeCount = 0;
-   vertexBufferLayout.attributes = NULL;
-   
    // Vertex state configuration
    WGPUVertexState vertexState = {};
    vertexState.module = smState.shaders["terrainShader"];  // Loaded shader module
-   vertexState.entryPoint = "vertMain";          // Entry point of the vertex shader
+   vertexState.entryPoint = WGPUString("vertMain");          // Entry point of the vertex shader
    vertexState.bufferCount = 0;
    vertexState.buffers = NULL;
    
    // Fragment state
    WGPUFragmentState fragmentState = {};
    fragmentState.module = smState.shaders["terrainShader"]; // Loaded fragment shader module
-   fragmentState.entryPoint = "fragMain";           // Entry point of the fragment shader
+   fragmentState.entryPoint = WGPUString("fragMain");           // Entry point of the fragment shader
    fragmentState.targetCount = 1;
    
    WGPUColorTargetState colorTargetState = {};
@@ -465,13 +469,13 @@ static TerrainProgramInfo buildTerrainProgram()
    WGPUMultisampleState multisampleState = {};
    multisampleState.count = 1;
    multisampleState.mask = ~0;
-   multisampleState.alphaToCoverageEnabled = false;
+   multisampleState.alphaToCoverageEnabled = WGPU_FALSE;
    
    // Depth stencil state
    // (NOTE: we need this even if we aren't using it)
    WGPUDepthStencilState depthStencilState = {};
    depthStencilState.format = WGPUTextureFormat_Depth32Float;      // Depth format
-   depthStencilState.depthWriteEnabled = true;                    // Enable depth writing
+   depthStencilState.depthWriteEnabled = WGPUOptionalBoolFromBool(true);                    // Enable depth writing
    depthStencilState.depthCompare = WGPUCompareFunction_Less;     // Use less-than
    depthStencilState.stencilFront.compare = WGPUCompareFunction_Always;
    depthStencilState.stencilFront.failOp = WGPUStencilOperation_Keep;
@@ -486,7 +490,7 @@ static TerrainProgramInfo buildTerrainProgram()
    
    // Create the render pipeline descriptor
    WGPURenderPipelineDescriptor pipelineDesc = {};
-   pipelineDesc.label = "Render Pipeline";
+   pipelineDesc.label = WGPUString("Render Pipeline");
    pipelineDesc.layout = pipelineLayout;
    pipelineDesc.vertex = vertexState;
    pipelineDesc.primitive = primitiveState;
@@ -506,7 +510,7 @@ ModelProgramInfo buildModelProgram()
    
    // Create the pipeline layout
    WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
-   pipelineLayoutDesc.label = "Pipeline Layout";
+   pipelineLayoutDesc.label = WGPUString("Pipeline Layout");
    pipelineLayoutDesc.bindGroupLayoutCount = 2;
    WGPUBindGroupLayout bindGroupLayouts[2] = {smState.commonUniformLayout, smState.commonTextureLayout};
    pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
@@ -548,14 +552,14 @@ ModelProgramInfo buildModelProgram()
       // Vertex state configuration
       WGPUVertexState vertexState = {};
       vertexState.module = smState.shaders["modelShader"];  // Loaded shader module
-      vertexState.entryPoint = "mainVert";          // Entry point of the vertex shader
+      vertexState.entryPoint = WGPUString("mainVert");          // Entry point of the vertex shader
       vertexState.bufferCount = 2;
       WGPUVertexBufferLayout vertexLayouts[2] = {vertexBufferLayout0, vertexBufferLayout1};
       vertexState.buffers = vertexLayouts;
       
       // Create the pipeline layout
       WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
-      pipelineLayoutDesc.label = "Pipeline Layout";
+      pipelineLayoutDesc.label = WGPUString("Pipeline Layout");
       pipelineLayoutDesc.bindGroupLayoutCount = 2;
       WGPUBindGroupLayout bindGroupLayouts[2] = {smState.commonUniformLayout, smState.commonTextureLayout};
       pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
@@ -565,7 +569,7 @@ ModelProgramInfo buildModelProgram()
       // Fragment state
       WGPUFragmentState fragmentState = {};
       fragmentState.module = smState.shaders["modelShader"]; // Loaded fragment shader module
-      fragmentState.entryPoint = "mainFrag";         // Entry point of the fragment shader
+      fragmentState.entryPoint = WGPUString("mainFrag");         // Entry point of the fragment shader
       fragmentState.targetCount = 1;
       
       WGPUColorTargetState colorTargetState = {};
@@ -627,12 +631,12 @@ ModelProgramInfo buildModelProgram()
       WGPUMultisampleState multisampleState = {};
       multisampleState.count = 1;
       multisampleState.mask = ~0;
-      multisampleState.alphaToCoverageEnabled = false;
+      multisampleState.alphaToCoverageEnabled = WGPU_FALSE;
       
       // Depth stencil state
       WGPUDepthStencilState depthStencilState = {};
       depthStencilState.format = WGPUTextureFormat_Depth32Float;      // Depth format
-      depthStencilState.depthWriteEnabled = true;                    // Enable depth writing
+      depthStencilState.depthWriteEnabled = WGPUOptionalBoolFromBool(true);                    // Enable depth writing
       depthStencilState.depthCompare = WGPUCompareFunction_Less;     // Use less-than comparison for depth testing
       depthStencilState.stencilFront.compare = WGPUCompareFunction_Always;
       depthStencilState.stencilFront.failOp = WGPUStencilOperation_Keep;
@@ -647,7 +651,7 @@ ModelProgramInfo buildModelProgram()
       
       // Create the render pipeline descriptor
       WGPURenderPipelineDescriptor pipelineDesc = {};
-      pipelineDesc.label = "Render Pipeline";
+      pipelineDesc.label = WGPUString("Render Pipeline");
       pipelineDesc.layout = pipelineLayout;
       pipelineDesc.vertex = vertexState;
       pipelineDesc.primitive = primitiveState;
@@ -788,8 +792,8 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    bindGroupLayoutEntry0.buffer.hasDynamicOffset = true;
    bindGroupLayoutEntry0.buffer.minBindingSize = sizeof(CommonUniformStruct);
    
-   WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc0;
-   bindGroupLayoutDesc0.label = "CommonUniformStruct Bind Group";
+   WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc0 = {};
+   bindGroupLayoutDesc0.label = WGPUString("CommonUniformStruct Bind Group");
    bindGroupLayoutDesc0.entryCount = 1;
    bindGroupLayoutDesc0.entries = &bindGroupLayoutEntry0;
    
@@ -817,7 +821,7 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    smState.commonUniformBuffer = smState.allocBuffer(sizeof(CommonUniformStruct), WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform, 256);
    
    WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc1 = {};
-   bindGroupLayoutDesc1.label = "Texture/Sampler Bind Group Layout";
+   bindGroupLayoutDesc1.label = WGPUString("Texture/Sampler Bind Group Layout");
    bindGroupLayoutDesc1.entryCount = 2;
    bindGroupLayoutDesc1.entries = bindGroupLayoutEntries1;
    
@@ -871,7 +875,7 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    bindGroupLayoutEntriesTER[5].sampler.type = WGPUSamplerBindingType_Filtering;
    
    WGPUBindGroupLayoutDescriptor bindGroupLayoutDescTER = {};
-   bindGroupLayoutDescTER.label = "Terrain Bind Group Layout";
+   bindGroupLayoutDescTER.label = WGPUString("Terrain Bind Group Layout");
    bindGroupLayoutDescTER.entryCount = 6;
    bindGroupLayoutDescTER.entries = bindGroupLayoutEntriesTER;
    
@@ -884,7 +888,7 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    commonEntry.size = sizeof(CommonUniformStruct);
    
    WGPUBindGroupDescriptor commonDesc = {};
-   commonDesc.label = "CommonUniformStruct";
+   commonDesc.label = WGPUString("CommonUniformStruct");
    commonDesc.layout = smState.commonUniformLayout;
    commonDesc.entryCount = 1;
    commonDesc.entries = &commonEntry;
@@ -952,11 +956,15 @@ void SDLState::requestWGPUAdapter()
    opts.compatibleSurface = gpuSurface;
    gpuInitState = SDLState::INIT_ADAPTER;
    
-   wgpuInstanceRequestAdapter(gpuInstance, &opts, [](WGPURequestAdapterStatus status, WGPUAdapter adapter, const char* message, void* userdata){
+   WGPURequestAdapterCallbackInfo callbackInfo = {};
+   callbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
+   callbackInfo.callback = [](WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView, void* userdata1, void*){
       if (status == WGPURequestAdapterStatus_Success)
-         ((SDLState*)userdata)->gpuAdapter = adapter;
-      ((SDLState*)userdata)->gpuInitState = SDLState::GOT_ADAPTER;
-   }, this);
+         ((SDLState*)userdata1)->gpuAdapter = adapter;
+      ((SDLState*)userdata1)->gpuInitState = SDLState::GOT_ADAPTER;
+   };
+   callbackInfo.userdata1 = this;
+   wgpuInstanceRequestAdapter(gpuInstance, &opts, callbackInfo);
    
    //wgpuInstanceProcessEvents(gGPUInstance);
 }
@@ -968,7 +976,7 @@ void GFXPollEvents()
 
 void GFXTeardown();
 
-extern void GFXSetCocoaWindow(SDL_Window* window, WGPUSurfaceDescriptorFromMetalLayer* s);
+extern void GFXSetCocoaWindow(SDL_Window* window, WGPUSurfaceSourceMetalLayer* s);
 
 bool SDLState::initWGPUSurface()
 {
@@ -986,14 +994,14 @@ bool SDLState::initWGPUSurface()
    
    if (SDL_strcmp(SDL_GetCurrentVideoDriver(), "cocoa") == 0)
    {
-      cs.sType = WGPUSType_SurfaceDescriptorFromMetalLayer;
+      cs.sType = WGPUSType_SurfaceSourceMetalLayer;
       
-      WGPUSurfaceDescriptorFromMetalLayer surfaceDescriptorFromMetalLayer;
+      WGPUSurfaceSourceMetalLayer surfaceDescriptorFromMetalLayer = {};
       surfaceDescriptorFromMetalLayer.chain = cs;
       GFXSetCocoaWindow(window, &surfaceDescriptorFromMetalLayer);
       
-      desc.label = "TorqueSurface";
-      desc.nextInChain = (const WGPUChainedStruct*)&surfaceDescriptorFromMetalLayer;
+      desc.label = WGPUString("TorqueSurface");
+      desc.nextInChain = &surfaceDescriptorFromMetalLayer.chain;
    }
    
 #elif defined(UNIX)
@@ -1009,7 +1017,7 @@ bool SDLState::initWGPUSurface()
       chainDescWL.display = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);;
       chainDescWL.surface = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);;
       
-      desc.label = "TorqueSurface";
+      desc.label = WGPUString("TorqueSurface");
       desc.nextInChain = (const WGPUChainedStruct*)&chainDescWL;
    }
    
@@ -1024,7 +1032,7 @@ bool SDLState::initWGPUSurface()
       chainDescX11.display = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);;
       chainDescX11.window = SDL_GetNumberProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);;
       
-      desc.label = "TorqueSurface";
+      desc.label = WGPUString("TorqueSurface");
       desc.nextInChain = (const WGPUChainedStruct*)&chainDescX11;
    }
    
@@ -1039,7 +1047,7 @@ bool SDLState::initWGPUSurface()
       chainDescWIN32.hinstance = GetModuleHandle(NULL);
       chainDescWIN32.hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);;
       
-      desc.label = "TorqueSurface";
+      desc.label = WGPUString("TorqueSurface");
       desc.nextInChain = (const WGPUChainedStruct*)&chainDescWIN32;
    }
    
@@ -1053,7 +1061,7 @@ bool SDLState::initWGPUSurface()
       chainDescES.chain = cs;
       chainDescES.selector = "canvas";
       
-      desc.label = "TorqueSurface";
+      desc.label = WGPUString("TorqueSurface");
       desc.nextInChain = (const WGPUChainedStruct*)&chainDescES;
    }
 #endif
@@ -1070,18 +1078,22 @@ void SDLState::requestWGPUDevice()
    WGPUDevice outDevice = NULL;
    WGPUDeviceDescriptor deviceDesc = {};
    
-   deviceDesc.label = "TVDevice";
+   deviceDesc.label = WGPUString("TVDevice");
    deviceDesc.requiredLimits = NULL;
-   deviceDesc.defaultQueue.label = "TVQueue";
+   deviceDesc.defaultQueue.label = WGPUString("TVQueue");
    
    gpuInitState = SDLState::INIT_DEVICE;
    
-   wgpuAdapterRequestDevice(gpuAdapter, &deviceDesc, [](WGPURequestDeviceStatus status, WGPUDevice device, char const * message, WGPU_NULLABLE void * userdata){
+   WGPURequestDeviceCallbackInfo callbackInfo = {};
+   callbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
+   callbackInfo.callback = [](WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView, WGPU_NULLABLE void * userdata1, WGPU_NULLABLE void *){
       if (status == WGPURequestDeviceStatus_Success)
-         ((SDLState*)userdata)->gpuDevice = device;
-      ((SDLState*)userdata)->gpuInitState = SDLState::GOT_DEVICE;
-      ((SDLState*)userdata)->gpuQueue = wgpuDeviceGetQueue(device);
-   }, this);
+         ((SDLState*)userdata1)->gpuDevice = device;
+      ((SDLState*)userdata1)->gpuInitState = SDLState::GOT_DEVICE;
+      ((SDLState*)userdata1)->gpuQueue = wgpuDeviceGetQueue(device);
+   };
+   callbackInfo.userdata1 = this;
+   wgpuAdapterRequestDevice(gpuAdapter, &deviceDesc, callbackInfo);
 }
 
 bool SDLState::initWGPUSwapchain()
@@ -1131,7 +1143,7 @@ bool SDLState::initWGPUSwapchain()
    // Make depth
    
    WGPUTextureDescriptor depthTextureDesc = {};
-   depthTextureDesc.label = "Depth Texture";
+   depthTextureDesc.label = WGPUString("Depth Texture");
    depthTextureDesc.size.width = backingSize[0];
    depthTextureDesc.size.height = backingSize[1];
    depthTextureDesc.size.depthOrArrayLayers = 1;
@@ -1238,7 +1250,7 @@ WGPUBindGroup SDLState::makeSimpleTextureBG(WGPUTextureView tex, WGPUSampler sam
    bindGroupEntries[1].sampler = sampler;
    
    WGPUBindGroupDescriptor bindGroupDesc = {};
-   bindGroupDesc.label = "SimpleBindGoup";
+   bindGroupDesc.label = WGPUString("SimpleBindGoup");
    bindGroupDesc.layout = smState.commonTextureLayout;
    bindGroupDesc.entryCount = 2;
    bindGroupDesc.entries = bindGroupEntries;
@@ -1278,7 +1290,7 @@ WGPUBindGroup SDLState::makeTerrainTextureBG(WGPUTextureView squareMatTex, WGPUT
    bindGroupEntries[5].sampler = samplerLinear;
    
    WGPUBindGroupDescriptor bindGroupDesc = {};
-   bindGroupDesc.label = "TerrainLayout";
+   bindGroupDesc.label = WGPUString("TerrainLayout");
    bindGroupDesc.layout = smState.terrainTextureLayout;
    bindGroupDesc.entryCount = 6;
    bindGroupDesc.entries = bindGroupEntries;
@@ -1318,12 +1330,12 @@ WGPURenderPassDescriptor SDLState::createRenderPass(bool secondary)
 
 bool SDLState::loadShaderModule(const char* name, const char* code)
 {
-   WGPUShaderModuleWGSLDescriptor wgslDesc = {};
-   wgslDesc.chain.sType = WGPUSType_ShaderModuleWGSLDescriptor;
-   wgslDesc.code = code;
+   WGPUShaderSourceWGSL wgslDesc = {};
+   wgslDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
+   wgslDesc.code = WGPUString(code);
    
    WGPUShaderModuleDescriptor shaderModuleDesc = {};
-   shaderModuleDesc.nextInChain = (const WGPUChainedStruct*)&wgslDesc;
+   shaderModuleDesc.nextInChain = &wgslDesc.chain;
    
    WGPUShaderModule shaderModule = wgpuDeviceCreateShaderModule(gpuDevice, &shaderModuleDesc);
    if (!shaderModule)
@@ -1390,7 +1402,7 @@ void SDLState::beginRenderPass(bool secondary)
       return;
 
    WGPUCommandEncoderDescriptor desc = {};
-   desc.label = "FrameEncoder";
+   desc.label = WGPUString("FrameEncoder");
    commandEncoder = wgpuDeviceCreateCommandEncoder(gpuDevice, &desc);
 
    WGPURenderPassDescriptor renderPassDesc = createRenderPass(secondary);
@@ -1462,7 +1474,8 @@ bool GFXBeginFrame()
       // Check status
       switch (smState.gpuSurfaceTexture.status)
       {
-         case WGPUSurfaceGetCurrentTextureStatus_Success:
+         case WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal:
+         case WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal:
             break;
          default:
          {
@@ -1471,7 +1484,7 @@ bool GFXBeginFrame()
       }
       
       WGPUTextureViewDescriptor viewDescriptor = {};
-      viewDescriptor.label = "WindowSurfaceView";
+      viewDescriptor.label = WGPUString("WindowSurfaceView");
       viewDescriptor.format = wgpuTextureGetFormat(smState.gpuSurfaceTexture.texture);
       viewDescriptor.dimension = WGPUTextureViewDimension_2D;
       viewDescriptor.baseMipLevel = 0;
@@ -1479,9 +1492,6 @@ bool GFXBeginFrame()
       viewDescriptor.arrayLayerCount = 1;
       viewDescriptor.aspect = WGPUTextureAspect_All;
       
-      // NOTE: if we decide later not to prepare the frame, it should end up getting released
-      // in changeDevice.
-      wgpuTextureReference(smState.gpuSurfaceTexture.texture);
       smState.gpuSurfaceTextureView = wgpuTextureCreateView(smState.gpuSurfaceTexture.texture, &viewDescriptor);
    }
 
@@ -1612,13 +1622,13 @@ int32_t GFXLoadCustomTexture(CustomTextureFormat fmt, uint32_t width, uint32_t h
       WGPUTextureView texView = wgpuTextureCreateView(tex, &textureViewDesc);
       
       // Upload texture data
-      WGPUTextureDataLayout layout = {};
+      WGPUTexelCopyBufferLayout layout = {};
       layout.offset = 0;
       layout.bytesPerRow = paddedWidth;
       layout.rowsPerImage = pow2H;
       WGPUExtent3D size = {pow2W, pow2H, 1};
       
-      WGPUImageCopyTexture copyInfo = {};
+      WGPUTexelCopyTextureInfo copyInfo = {};
       copyInfo.texture = tex;
       copyInfo.mipLevel = 0;
       copyInfo.origin = (WGPUOrigin3D){0, 0, 0};
@@ -1674,13 +1684,13 @@ void GFXUpdateCustomTextureAligned(int32_t texID, void* texData)
    SDLState::TexInfo& info = smState.textures[texID];
    
    // Upload texture data
-   WGPUTextureDataLayout layout = {};
+   WGPUTexelCopyBufferLayout layout = {};
    layout.offset = 0;
    layout.bytesPerRow = info.dims[0];
    layout.rowsPerImage = info.dims[1];
    WGPUExtent3D size = {info.dims[0], info.dims[1], 1};
    
-   WGPUImageCopyTexture copyInfo = {};
+   WGPUTexelCopyTextureInfo copyInfo = {};
    copyInfo.texture = info.texture;
    copyInfo.mipLevel = 0;
    copyInfo.origin = (WGPUOrigin3D){0, 0, 0};
@@ -1746,13 +1756,13 @@ int32_t GFXLoadTexture(Bitmap* bmp, Palette* defaultPal)
       WGPUTextureView texView = wgpuTextureCreateView(tex, &textureViewDesc);
       
       // Upload texture data
-      WGPUTextureDataLayout layout = {};
+      WGPUTexelCopyBufferLayout layout = {};
       layout.offset = 0;
       layout.bytesPerRow = paddedWidth;
       layout.rowsPerImage = pow2H;
       WGPUExtent3D size = {pow2W, pow2H, 1};
       
-      WGPUImageCopyTexture copyInfo = {};
+      WGPUTexelCopyTextureInfo copyInfo = {};
       copyInfo.texture = tex;
       copyInfo.mipLevel = 0;
       copyInfo.origin = (WGPUOrigin3D){0, 0, 0};
@@ -1849,14 +1859,14 @@ int32_t GFXLoadTextureSet(uint32_t numBitmaps, Bitmap** bmps, Palette* defaultPa
     // Upload texture data for each layer
     for (uint32_t i = 0; i < numBitmaps; ++i)
     {
-        WGPUTextureDataLayout layout = {};
+        WGPUTexelCopyBufferLayout layout = {};
         layout.offset = 0;
         layout.bytesPerRow = paddedWidth;
         layout.rowsPerImage = pow2H;
 
         WGPUExtent3D size = {pow2W, pow2H, 1};
 
-        WGPUImageCopyTexture copyInfo = {};
+        WGPUTexelCopyTextureInfo copyInfo = {};
         copyInfo.texture = tex;
         copyInfo.mipLevel = 0;
         copyInfo.origin = (WGPUOrigin3D){0, 0, 0};
