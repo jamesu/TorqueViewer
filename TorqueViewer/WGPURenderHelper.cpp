@@ -1569,16 +1569,12 @@ bool GFXBeginFrame()
 
 void GFXEndFrame()
 {
-   smState.endRenderPass();
-   
-   // Render imgui
-   
-   smState.beginRenderPass(true);
-   ImGui::EndFrame();
    ImGui::Render();
    ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), smState.renderEncoder);
    
    smState.endRenderPass();
+   
+   wgpuSurfacePresent(smState.gpuSurface);
    
    if (smState.gpuSurfaceTexture.texture)
    {
@@ -1587,9 +1583,7 @@ void GFXEndFrame()
       smState.gpuSurfaceTextureView = NULL;
       smState.gpuSurfaceTexture = {};
    }
-   
-   wgpuSurfacePresent(smState.gpuSurface);
-   
+
    smState.resetBufferAllocs();
 }
 
