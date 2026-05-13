@@ -53,6 +53,21 @@ public:
       mStrings.push_back(str);
       return static_cast<int>(mStrings.size() - 1);
    }
+
+   int findString(const std::string& str, bool caseSensitive = false) const
+   {
+      std::string strCompare = caseSensitive ? str : toLower(str);
+
+      for (size_t i = 0; i < mStrings.size(); ++i) {
+         std::string current = caseSensitive ?
+         mStrings[i] : toLower(mStrings[i]);
+         if (current == strCompare) {
+            return static_cast<int>(i);
+         }
+      }
+
+      return -1;
+   }
    
    const char* getS(std::size_t index) const
    {
@@ -325,34 +340,143 @@ struct Sequence
    {
       return (flags & inFlags) != 0;
    }
+
+   static int32_t readName(NameTable& nameTable, MemRStream& fs, bool addName)
+   {
+      int32_t byteLength = 0;
+      if (!fs.read(byteLength))
+         return -1;
+
+      if (byteLength <= 0)
+         return -1;
+
+      std::string name;
+      name.resize(byteLength);
+      if (!fs.read((uint64_t)byteLength, name.data()))
+         return -1;
+
+      int32_t nameIndex = nameTable.findString(name);
+      if (nameIndex >= 0)
+         return nameIndex;
+
+      std::replace(name.begin(), name.end(), ' ', '_');
+      nameIndex = nameTable.findString(name);
+      if (nameIndex >= 0)
+         return nameIndex;
+
+      if (addName)
+         return nameTable.addString(name);
+
+      return -1;
+   }
+
+   bool readSerialized(MemRStream &fs, int version, bool readNameIndex=true, NameTable* nameTable=nullptr, bool addName=true)
+   {
+      *this = Sequence();
+
+      if (readNameIndex)
+      {
+         if (!fs.read(nameIndex))
+            return false;
+      }
+      else if (nameTable)
+      {
+         nameIndex = readName(*nameTable, fs, addName);
+      }
+      else
+      {
+         nameIndex = -1;
+      }
+
+      return readBody(fs, version);
+   }
    
    void read(MemRStream &fs, int version)
    {
-      fs.read(nameIndex);
-      fs.read(flags);
-      fs.read(numKeyFrames);
-      fs.read(duration);
-      fs.read(priority);
-      fs.read(firstGroundFrame);
-      fs.read(numGroundFrames);
-      fs.read(baseRot);
-      fs.read(baseTrans);
-      fs.read(baseScale);
-      fs.read(baseObjectState);
-      fs.read(baseDecalState);
-      fs.read(firstTrigger);
-      fs.read(numTriggers);
-      fs.read(toolBegin);
-      
-      // Assume readIntegerSet is a function to read vector<int> from the file stream
-      readIntegerSet(fs, mattersRot);
-      readIntegerSet(fs, mattersTranslation);
-      readIntegerSet(fs, mattersScale);
-      readIntegerSet(fs, mattersDecal);
-      readIntegerSet(fs, mattersIfl);
-      readIntegerSet(fs, mattersVis);
-      readIntegerSet(fs, mattersFrame);
-      readIntegerSet(fs, mattersMatframe);
+      readSerialized(fs, version, true, nullptr, false);
+   }
+
+   bool readBody(MemRStream &fs, int version)
+   {
+      flags = 0;
+      baseScale = -1;
+      mattersRot.reset();
+      mattersTranslation.reset();
+      mattersScale.reset();
+      mattersDecal.reset();
+      mattersIfl.reset();
+      mattersVis.reset();
+      mattersFrame.reset();
+      mattersMatframe.reset();
+
+      if (version >= 19 && version <= 21)
+      {
+         if (!fs.read(numKeyFrames) || !fs.read(duration))
+            return false;
+
+         bool blend = false;
+         bool cyclic = false;
+         bool makePath = false;
+         if (!fs.read(blend) || !fs.read(cyclic) || !fs.read(makePath))
+            return false;
+
+         if (blend)
+            flags |= Blend;
+         if (cyclic)
+            flags |= Cyclic;
+         if (makePath)
+            flags |= MakePath;
+
+         if (!fs.read(priority) ||
+             !fs.read(firstGroundFrame) ||
+             !fs.read(numGroundFrames) ||
+             !fs.read(baseRot) ||
+             !fs.read(baseObjectState) ||
+             !fs.read(baseDecalState) ||
+             !fs.read(firstTrigger) ||
+             !fs.read(numTriggers) ||
+             !fs.read(toolBegin))
+            return false;
+
+         readIntegerSet(fs, mattersRot);
+         readIntegerSet(fs, mattersDecal);
+         readIntegerSet(fs, mattersIfl);
+         readIntegerSet(fs, mattersVis);
+         readIntegerSet(fs, mattersFrame);
+         readIntegerSet(fs, mattersMatframe);
+
+         baseTrans = baseRot;
+         mattersTranslation = mattersRot;
+      }
+      else
+      {
+         if (!fs.read(flags) ||
+             !fs.read(numKeyFrames) ||
+             !fs.read(duration) ||
+             !fs.read(priority) ||
+             !fs.read(firstGroundFrame) ||
+             !fs.read(numGroundFrames) ||
+             !fs.read(baseRot) ||
+             !fs.read(baseTrans) ||
+             !fs.read(baseScale) ||
+             !fs.read(baseObjectState) ||
+             !fs.read(baseDecalState) ||
+             !fs.read(firstTrigger) ||
+             !fs.read(numTriggers) ||
+             !fs.read(toolBegin))
+            return false;
+
+         readIntegerSet(fs, mattersRot);
+         readIntegerSet(fs, mattersTranslation);
+         readIntegerSet(fs, mattersScale);
+         readIntegerSet(fs, mattersDecal);
+         readIntegerSet(fs, mattersIfl);
+         readIntegerSet(fs, mattersVis);
+         readIntegerSet(fs, mattersFrame);
+         readIntegerSet(fs, mattersMatframe);
+      }
+
+      return true;
    }
    
    void write(MemRStream &fs, int version, bool noIndex=false)

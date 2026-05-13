@@ -14,6 +14,27 @@ struct IO
    {
       EXPORTER_VERSION = 2
    };
+
+   static bool readDsqSequence(Shape* shape, Sequence& seq, MemRStream& stream, uint32_t version, bool readNameIndex = true, bool addName = true)
+   {
+      return seq.readSerialized(stream, version, readNameIndex, &shape->mNameTable, addName);
+   }
+
+   static bool readDSQSequences(Shape* shape, MemRStream& stream, uint32_t version, bool readNameIndex = true, bool addNames = true, bool append = true)
+   {
+      if (!append)
+         shape->mSequences.clear();
+
+      while (stream.mPos < stream.mSize)
+      {
+         Sequence seq;
+         if (!readDsqSequence(shape, seq, stream, version, readNameIndex, addNames))
+            return false;
+         shape->mSequences.push_back(seq);
+      }
+
+      return stream.mPos == stream.mSize;
+   }
    
    template<typename T> static bool readShape(Shape* shape, T& ds)
    {
