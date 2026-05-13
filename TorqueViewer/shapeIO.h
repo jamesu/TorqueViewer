@@ -181,7 +181,7 @@ struct IO
       {
          uint32_t sz = 0;
          ds.read(sz);
-         ds.read32(sz, &meshIndexList[0]);
+         ds.read32(sz, meshIndexList.data());
       }
       
       // Reading default translations and rotations
@@ -314,6 +314,9 @@ struct IO
          }
          assert(false);
       }
+      
+      // Resolve mesh parents
+      resolveMeshParents(shape);
       
       ds.readCheck();
       
@@ -761,6 +764,84 @@ struct IO
    bool readSplit(MemRStream& stream, Shape* shape);
    bool writeSplit(MemRStream& write, Shape* shape, uint32_t version=DefaultVersion);
    
+   static bool copyParentMeshData(Shape* shape, uint32_t meshIndex)
+   {
+      if (!shape || meshIndex >= shape->mMeshes.size())
+         return false;
+
+      Mesh& mesh = shape->mMeshes[meshIndex];
+      const uint32_t parentIndex = static_cast<uint32_t>(mesh.mParent);
+
+      if (mesh.mParent < 0 || parentIndex >= shape->mMeshes.size())
+      {
+         return true;
+      }
+      
+      Mesh& parentMesh = shape->mMeshes[parentIndex];
+      if (!parentMesh.isValid())
+      {
+         return false;
+      }
+      
+      BasicData* dstBasic = mesh.getBasicData();
+      BasicData* srcBasic = parentMesh.getBasicData();
+
+      if (dstBasic && srcBasic)
+      {
+         // Base mesh shared arrays.
+         dstBasic->verts   = srcBasic->verts;
+         dstBasic->tverts  = srcBasic->tverts;
+         dstBasic->normals = srcBasic->normals;
+      }
+
+      SkinData* dstSkin = mesh.getSkinData();
+      SkinData* srcSkin = parentMesh.getSkinData();
+
+      if (dstSkin)
+      {
+         if (!srcSkin)
+         {
+            // A skin mesh parent should normally also have skin data.
+            return false;
+         }
+
+         // Skin-specific shared arrays.
+         dstSkin->nodeTransforms = srcSkin->nodeTransforms;
+         dstSkin->vindex         = srcSkin->vindex;
+         dstSkin->bindex         = srcSkin->bindex;
+         dstSkin->vweight        = srcSkin->vweight;
+         dstSkin->nodeIndex      = srcSkin->nodeIndex;
+      }
+
+      return true;
+   }
+   
+   static bool resolveMeshParents(Shape* shape)
+   {
+      if (!shape)
+         return false;
+
+      bool ok = true;
+
+      for (uint32_t i = 0; i < shape->mMeshes.size(); i++)
+      {
+         Mesh& mesh = shape->mMeshes[i];
+         if (!mesh.isValid())
+         {
+            ok = false;
+            continue;
+         }
+
+         if (mesh.mParent >= 0 &&
+             !copyParentMeshData(shape, i))
+         {
+            ok = false;
+         }
+      }
+
+      return ok;
+   }
+   
    template<typename T> static bool readMesh(Mesh* mesh, Shape* shape, T& ds)
    {
       uint32_t sz = 0;
@@ -854,17 +935,15 @@ struct IO
          
          ds.read(sz);
          basicData->indices.resize(sz);
-         ds.read16(sz, &basicData->indices[0]);
+         ds.read16(sz, basicData->indices.data());
          
          ds.read(sz);
          basicData->mergeIndices.resize(sz);
-         ds.read16(sz, &basicData->mergeIndices[0]);
+         ds.read16(sz, basicData->mergeIndices.data());
          
          ds.read(mesh->mVertsPerFrame);
          ds.read(mesh->mFlags);
          ds.readCheck();
-         
-         mesh->calculateBounds();
       }
       
       if (skinData)
@@ -921,12 +1000,13 @@ struct IO
             skinData->vindex.resize(sz);
             skinData->bindex.resize(sz);
             skinData->vweight.resize(sz);
-            ds.read32(sz, &skinData->vindex[0]);
-            ds.read32(sz, &skinData->bindex[0]);
-            ds.read32(sz, &skinData->vweight[0]);
+            ds.read32(sz, skinData->vindex.data());
+            ds.read32(sz, skinData->bindex.data());
+            ds.read32(sz, skinData->vweight.data());
             
             ds.read(sz);
-            ds.read32(sz, &skinData->nodeIndex[0]);
+            skinData->nodeIndex.resize(sz);
+            ds.read32(sz, skinData->nodeIndex.data());
          }
          else
          {
@@ -954,11 +1034,11 @@ struct IO
          
          ds.read(sz);
          basicData->indices.resize(sz);
-         ds.read16(sz, &decalData->indices[0]);
+         ds.read16(sz, decalData->indices.data());
          
          ds.read(sz);
          decalData->startPrimitive.resize(sz);
-         ds.read32(sz, &decalData->startPrimitive[0]);
+         ds.read32(sz, decalData->startPrimitive.data());
          
          ds.read(sz);
          decalData->texGenS.resize(sz);
@@ -994,24 +1074,26 @@ struct IO
          
          ds.read(sz);
          sortedData->startCluster.resize(sz);
-         ds.read32(sz, &sortedData->startCluster[0]);
+         ds.read32(sz, sortedData->startCluster.data());
          
          ds.read(sz);
          sortedData->firstVerts.resize(sz);
-         ds.read32(sz, &sortedData->firstVerts[0]);
+         ds.read32(sz, sortedData->firstVerts.data());
          
          ds.read(sz);
          sortedData->numVerts.resize(sz);
-         ds.read32(sz, &sortedData->numVerts[0]);
+         ds.read32(sz, sortedData->numVerts.data());
          
          ds.read(sz);
          sortedData->firstTVerts.resize(sz);
-         ds.read32(sz, &sortedData->firstTVerts[0]);
+         ds.read32(sz, sortedData->firstTVerts.data());
          
          ds.read(sortedData->alwaysWriteDepth);
          
          ds.readCheck();
       }
+      
+      mesh->calculateBounds();
       
       return true;
    }

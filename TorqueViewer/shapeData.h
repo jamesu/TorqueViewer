@@ -54,6 +54,15 @@ public:
       return static_cast<int>(mStrings.size() - 1);
    }
    
+   const char* getS(std::size_t index) const
+   {
+      if (index < mStrings.size())
+      {
+         return mStrings[index].c_str();
+      }
+      return nullptr;
+   }
+   
    const std::string& get(std::size_t index) const
    {
       if (index < mStrings.size())
@@ -462,7 +471,7 @@ static void EmitPackedSkinVertices(SkinData* skinData, ModelSkinVertex* outv)
       ModelSkinVertex& ov = outv[vIdx];
       for (uint8_t j=0; j<ModelSkinVertex::MAX_WEIGHTS; j++)
       {
-         if (ov.weights[j] != 0.0f)
+         if (ov.weights[j] == 0.0f)
          {
             ov.index[j] = bIdx;
             ov.weights[j] = weight;
@@ -540,6 +549,8 @@ public:
    {
       return mType == T_Sorted ? reinterpret_cast<SortedData*>(mData.get()) : NULL;
    }
+   
+   inline bool isValid() const { return mData.get() != nullptr; }
    
    void clearData()
    {
@@ -876,6 +887,8 @@ public:
    
    Node* getNode(const std::string_view& name);
    int getNodeIndex(const std::string_view& name);
+   
+   const char* getName(int32_t index) const { return mNameTable.getS(index); }
    
    Sequence* getSequence(const std::string_view& name);
    
