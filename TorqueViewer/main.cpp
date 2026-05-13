@@ -152,6 +152,53 @@ void ConsolePersistObject::initStatics()
 class GenericViewer
 {
 public:
+   static bool openTextureStreamWithFallback(ResManager* resourceManager, const std::string& resourceFilename, int32_t resourceMount, const char* filename, MemRStream& outStream, std::string* outResolvedPath = NULL)
+   {
+      fs::path texturePath(filename);
+      fs::path textureStem = texturePath.stem();
+
+      std::vector<std::string> extensionsToTry;
+      std::string originalExt = texturePath.extension().generic_string();
+      if (!originalExt.empty())
+      {
+         extensionsToTry.push_back(originalExt);
+      }
+      else
+      {
+         extensionsToTry.push_back(".bmp");
+         extensionsToTry.push_back(".gif");
+         extensionsToTry.push_back(".png");
+         extensionsToTry.push_back(".jpg");
+      }
+
+      fs::path searchDir = fs::path(resourceFilename).parent_path();
+      for (int depth = 0; depth < 2; ++depth)
+      {
+         for (const std::string& ext : extensionsToTry)
+         {
+            fs::path candidatePath = searchDir / textureStem;
+            candidatePath.replace_extension(ext);
+            const std::string candidate = candidatePath.generic_string();
+            if (resourceManager->openFile(candidate.c_str(), outStream, resourceMount))
+            {
+               if (outResolvedPath)
+               {
+                  *outResolvedPath = candidate;
+               }
+               return true;
+            }
+         }
+
+         if (searchDir.empty())
+         {
+            break;
+         }
+         searchDir = searchDir.parent_path();
+      }
+
+      return false;
+   }
+
    
    struct LoadedTexture
    {
@@ -176,6 +223,8 @@ public:
    ResManager* mResourceManager;
    Palette* mPalette;
    MaterialList* mMaterialList;
+   std::string mResourceFilename;
+   int32_t mResourceMount;
    
    bool initVB;
    bool useShared;
@@ -191,6 +240,24 @@ public:
    GenericViewer() : mResourceManager(NULL), mPalette(NULL), mMaterialList(NULL)
    {
       useShared = false;
+      mResourceMount = -1;
+   }
+
+   void setResourcePath(const char* filename, int32_t forceMount = -1)
+   {
+      mResourceFilename.clear();
+      mResourceMount = forceMount;
+
+      if (filename == NULL)
+      {
+         return;
+      }
+
+      std::string resolvedFilename;
+      int32_t resolvedMount = forceMount;
+      mResourceManager->resolveResourcePath(filename, resolvedFilename, resolvedMount, forceMount);
+      mResourceFilename = resolvedFilename;
+      mResourceMount = resolvedMount;
    }
    
    void updateMVP()
@@ -248,7 +315,8 @@ public:
          
          // Find in resources
          MemRStream mem(0, NULL);
-         if (mResourceManager->openFile(fname.c_str(), mem))
+         std::string resolvedPath;
+         if (openTextureStreamWithFallback(mResourceManager, mResourceFilename, mResourceMount, fname.c_str(), mem, &resolvedPath))
          {
             Bitmap* bmp = new Bitmap();
             if (!bmp->read(mem))
@@ -308,7 +376,8 @@ public:
       
       // Find in resources
       MemRStream mem(0, NULL);
-      if (mResourceManager->openFile(filename, mem))
+      std::string resolvedPath;
+      if (openTextureStreamWithFallback(mResourceManager, mResourceFilename, mResourceMount, filename, mem, &resolvedPath))
       {
          Bitmap* bmp = new Bitmap();
          if (bmp->read(mem))
@@ -316,7 +385,7 @@ public:
             int32_t texID = GFXLoadTexture(bmp, mPalette);
             if (texID >= 0)
             {
-               printf("Loaded texture %s dimensions %ix%i\n", filename, bmp->mWidth, bmp->mHeight);
+               printf("Loaded texture %s dimensions %ix%i\n", resolvedPath.c_str(), bmp->mWidth, bmp->mHeight);
                outTexInfo.bmpFlags = 0;// TOFIX bmp->mFlags;
                outTexInfo.texID = texID;
                outTexInfo.width = bmp->mWidth;
@@ -1484,8 +1553,11 @@ public:
       clear();
       
       mShape = &inShape;
+      mMaterialList = &mShape->mMaterials;
       
       initShapeObjects();
+      
+      initMaterials();
       
       initRender();
       
@@ -2026,6 +2098,7 @@ public:
          Dts3::Shape* shape = (Dts3::Shape*)inst;
          mShape = shape;
          mViewer.clear();
+         mViewer.setResourcePath(filename, pathIdx);
          mViewer.loadShape(*mShape);
          
          //uint32_t thr = mViewer.addThread();

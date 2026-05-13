@@ -964,6 +964,45 @@ public:
 
 std::unordered_map<std::string, ResManager::CreateFunc> ResManager::smCreateFuncs;
 
+static bool pathHasPrefix(const fs::path& path, const fs::path& prefix)
+{
+   auto pathItr = path.begin();
+   auto prefixItr = prefix.begin();
+   for (; prefixItr != prefix.end(); ++prefixItr, ++pathItr)
+   {
+      if (pathItr == path.end() || *pathItr != *prefixItr)
+      {
+         return false;
+      }
+   }
+   return true;
+}
+
+static bool openFilesystemStream(const char* filename, MemRStream& outStream)
+{
+   std::ifstream file(filename, std::ios::binary | std::ios::ate);
+   if (!file.is_open())
+   {
+      return false;
+   }
+
+   uint64_t size = file.tellg();
+   file.seekg(0);
+   uint8_t* data = (uint8_t*)malloc(size);
+   file.read((char*)data, size);
+
+   if (file.fail())
+   {
+      free(data);
+      file.close();
+      return false;
+   }
+
+   outStream = MemRStream(size, data, true);
+   file.close();
+   return true;
+}
+
 void ResManager::registerCreateFunc(const char* ext, CreateFunc func)
 {
    smCreateFuncs[ext] = func;
@@ -991,36 +1030,90 @@ void ResManager::addVolume(const char *filename)
    }
 }
 
+bool ResManager::resolveResourcePath(const char *filename, std::string& outFilename, int32_t& outMount, int32_t forceMount) const
+{
+   fs::path inputPath(filename);
+   outFilename = inputPath.generic_string();
+   outMount = forceMount;
+
+   if (!inputPath.is_absolute())
+   {
+      return true;
+   }
+
+   fs::path normalizedInput = fs::absolute(inputPath).lexically_normal();
+   int32_t bestMount = -1;
+   size_t bestDepth = 0;
+
+   for (size_t mountIndex = 0; mountIndex < mPaths.size(); ++mountIndex)
+   {
+      if (forceMount >= 0 && forceMount != (int32_t)mountIndex)
+      {
+         continue;
+      }
+
+      fs::path mountPath = fs::absolute(fs::path(mPaths[mountIndex])).lexically_normal();
+      if (!pathHasPrefix(normalizedInput, mountPath))
+      {
+         continue;
+      }
+
+      const fs::path relativePath = normalizedInput.lexically_relative(mountPath);
+      if (relativePath.empty() || relativePath == ".")
+      {
+         continue;
+      }
+
+      size_t depth = 0;
+      for (const auto& ignoredPart : mountPath)
+      {
+         (void)ignoredPart;
+         depth++;
+      }
+
+      if (bestMount < 0 || depth > bestDepth)
+      {
+         bestMount = (int32_t)mountIndex;
+         bestDepth = depth;
+         outFilename = relativePath.generic_string();
+         outMount = bestMount;
+      }
+   }
+
+   if (bestMount >= 0)
+   {
+      return true;
+   }
+
+   outFilename = normalizedInput.generic_string();
+   outMount = -1;
+   return true;
+}
+
 bool ResManager::openFile(const char *filename, MemRStream &stream, int32_t forceMount)
 {
-   // Check cwd
+   std::string resolvedFilename;
+   int32_t resolvedMount = forceMount;
+   resolveResourcePath(filename, resolvedFilename, resolvedMount, forceMount);
+
+   if (resolvedMount < 0 && openFilesystemStream(resolvedFilename.c_str(), stream))
+   {
+      return true;
+   }
+
    int count = 0;
    for (std::string &path: mPaths)
    {
-      if (forceMount >= 0 && count != forceMount)
+      if (resolvedMount >= 0 && count != resolvedMount)
       {
          count++;
          continue;
       }
       char buffer[PATH_MAX];
-      snprintf(buffer, PATH_MAX, "%s/%s", path.c_str(), filename);
-      std::ifstream file(filename, std::ios::binary | std::ios::ate);
-      if (file.is_open())
+      snprintf(buffer, PATH_MAX, "%s/%s", path.c_str(), resolvedFilename.c_str());
+      if (openFilesystemStream(buffer, stream))
       {
-         uint64_t size = file.tellg();
-         file.seekg(0);
-         uint8_t* data = (uint8_t*)malloc(size);
-         file.read((char*)data, size);
-         
-         if (!file.fail())
-         {
-            stream = MemRStream(size, data, true);
-            file.close();
-            return true;
-         }
-         free(data);
-         file.close();
-         return false;
+         return true;
       }
       count++;
    }
@@ -1028,14 +1121,14 @@ bool ResManager::openFile(const char *filename, MemRStream &stream, int32_t forc
    // Scan volumes
    for (Volume* vol: mVolumes)
    {
-      if (forceMount >= 0 && count != forceMount)
+      if (resolvedMount >= 0 && count != resolvedMount)
       {
          count++;
          continue;
       }
-      if (vol->openStream(vol->mFile, filename, stream))
+      if (vol->openStream(vol->mFile, resolvedFilename.c_str(), stream))
       {
-         printf("Loaded volume file %s from volume\n", filename);
+         printf("Loaded volume file %s from volume\n", resolvedFilename.c_str());
          return true;
       }
       count++;
@@ -1141,7 +1234,11 @@ const char *ResManager::getMountName(uint32_t idx)
 ResourceInstance* ResManager::createResource(const char *filename, int32_t forceMount)
 {
    MemRStream stream;
-   const char* ext = strrchr(filename, '.');
+   std::string resolvedFilename;
+   int32_t resolvedMount = forceMount;
+   resolveResourcePath(filename, resolvedFilename, resolvedMount, forceMount);
+
+   const char* ext = strrchr(resolvedFilename.c_str(), '.');
    if (!ext)
       return NULL;
    
@@ -1149,7 +1246,7 @@ ResourceInstance* ResManager::createResource(const char *filename, int32_t force
    if (itr == smCreateFuncs.end())
       return NULL;
    
-   if (openFile(filename, stream, forceMount))
+   if (openFile(resolvedFilename.c_str(), stream, resolvedMount))
    {
       ResourceInstance* inst = itr->second();
       if (!inst->read(stream))

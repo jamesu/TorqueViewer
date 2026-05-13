@@ -940,6 +940,8 @@ public:
    static void initStatics();
    
    void addVolume(const char *filename);
+
+   bool resolveResourcePath(const char *filename, std::string& outFilename, int32_t& outMount, int32_t forceMount=-1) const;
    
    bool openFile(const char *filename, MemRStream &stream, int32_t forceMount=-1);
    
