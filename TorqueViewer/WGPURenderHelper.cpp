@@ -1365,15 +1365,16 @@ WGPUBindGroup SDLState::makeTerrainTextureBG(WGPUTextureView squareMatTex, WGPUT
 WGPURenderPassDescriptor SDLState::createRenderPass(bool secondary)
 {
    // Color attachment
-   static WGPURenderPassColorAttachment colorAttachment = {};
+   static WGPURenderPassColorAttachment colorAttachment = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
    colorAttachment.view = gpuSurfaceTextureView;
+   colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
    colorAttachment.resolveTarget = NULL;  // No MSAA
    colorAttachment.loadOp = secondary ? WGPULoadOp_Load : WGPULoadOp_Clear;  // Clear the color buffer at the start
    colorAttachment.storeOp = WGPUStoreOp_Store; // Store the color output
    colorAttachment.clearValue = (WGPUColor){0.0, 0.0, 0.0, 1.0}; // Clear to black with full opacity
    
    // Depth attachment
-   static WGPURenderPassDepthStencilAttachment depthAttachment = {};
+   static WGPURenderPassDepthStencilAttachment depthAttachment = WGPU_RENDER_PASS_DEPTH_STENCIL_ATTACHMENT_INIT;
    depthAttachment.view = depthTextureView;
    depthAttachment.depthLoadOp = WGPULoadOp_Clear;  // Clear the depth buffer
    depthAttachment.depthStoreOp = WGPUStoreOp_Store; // Store depth after rendering
@@ -1382,7 +1383,7 @@ WGPURenderPassDescriptor SDLState::createRenderPass(bool secondary)
    depthAttachment.stencilStoreOp = WGPUStoreOp_Discard;
    depthAttachment.stencilClearValue = 0;
    
-   WGPURenderPassDescriptor renderPassDesc = {};
+   WGPURenderPassDescriptor renderPassDesc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
    renderPassDesc.colorAttachmentCount = 1;
    renderPassDesc.colorAttachments = &colorAttachment;
    renderPassDesc.depthStencilAttachment = &depthAttachment; // Attach the depth texture
