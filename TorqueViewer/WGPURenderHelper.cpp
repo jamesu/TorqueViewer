@@ -1779,9 +1779,14 @@ int32_t GFXLoadTexture(Bitmap* bmp, Palette* defaultPal)
    {
       // TOFIX
    }
+   else if (bmp->mBitDepth == 32)
+   {
+      texData = new uint8_t[alignedMipSize];
+      copyMipDirect(bmp->mHeight, bmp->getStride(bmp->mWidth), paddedWidth, bmp->mMips[0], texData);
+   }
    else if (bmp->mBitDepth == 24)
    {
-      uint8_t* texData = new uint8_t[alignedMipSize];
+      texData = new uint8_t[alignedMipSize];
       copyMipDirectPadded(bmp->mHeight, bmp->getStride(bmp->mWidth), paddedWidth, bmp->mMips[0], texData);
    }
    else
@@ -1891,6 +1896,11 @@ int32_t GFXLoadTextureSet(uint32_t numBitmaps, Bitmap** bmps, Palette* defaultPa
         if (bmp->mFormat == Bitmap::FORMAT_PAL)
         {
            // TOFIX
+        }
+        else if (bmp->mBitDepth == 32)
+        {
+            texDataArray[i] = new uint8_t[alignedMipSize];
+            copyMipDirect(bmp->mHeight, bmp->getStride(bmp->mWidth), paddedWidth, bmp->mMips[0], texDataArray[i]);
         }
         else if (bmp->mBitDepth == 24)
         {

@@ -200,6 +200,7 @@ bool Bitmap::readStbi(MemRStream& mem)
    mWidth = width;
    mHeight = height;
    mMipLevels = 1;
+   mData = image_data;
    mMips[0] = &mData[0];
    
    return true;
@@ -238,6 +239,38 @@ bool Bitmap::readBM8(MemRStream& mem)
    mem.read(byteSize, mData);
    
    return true;
+}
+
+bool Bitmap::readAuto(MemRStream& mem)
+{
+   const uint64_t startPos = mem.mPos;
+
+   MemRStream tryStream(mem.mSize, mem.mPtr, false);
+   tryStream.mPos = startPos;
+   if (readStbi(tryStream))
+   {
+      mem.mPos = tryStream.mPos;
+      return true;
+   }
+
+   tryStream = MemRStream(mem.mSize, mem.mPtr, false);
+   tryStream.mPos = startPos;
+   if (readBM8(tryStream))
+   {
+      mem.mPos = tryStream.mPos;
+      return true;
+   }
+
+   tryStream = MemRStream(mem.mSize, mem.mPtr, false);
+   tryStream.mPos = startPos;
+   if (read(tryStream))
+   {
+      mem.mPos = tryStream.mPos;
+      return true;
+   }
+
+   mem.mPos = startPos;
+   return false;
 }
 
 bool Bitmap::read(MemRStream& mem)

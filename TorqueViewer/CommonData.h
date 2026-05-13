@@ -495,6 +495,7 @@ public:
    
    bool readStbi(MemRStream& mem);
    bool readBM8(MemRStream& mem);
+   bool readAuto(MemRStream& mem);
    bool read(MemRStream& mem);
    
    static int stbi_read_callback(void *user, char *data, int size);

@@ -319,7 +319,7 @@ public:
          if (openTextureStreamWithFallback(mResourceManager, mResourceFilename, mResourceMount, fname.c_str(), mem, &resolvedPath))
          {
             Bitmap* bmp = new Bitmap();
-            if (!bmp->read(mem))
+            if (!bmp->readAuto(mem))
             {
                fail = true;
                break;
@@ -380,7 +380,7 @@ public:
       if (openTextureStreamWithFallback(mResourceManager, mResourceFilename, mResourceMount, filename, mem, &resolvedPath))
       {
          Bitmap* bmp = new Bitmap();
-         if (bmp->read(mem))
+         if (bmp->readAuto(mem))
          {
             int32_t texID = GFXLoadTexture(bmp, mPalette);
             if (texID >= 0)
