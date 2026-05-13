@@ -176,6 +176,7 @@ struct SDLState
       uint32_t numVerts;
       uint32_t numTexVerts;
       uint32_t numInds;
+      uint32_t numSkinVerts;
       
       // local
       ModelVertex* vertData;
@@ -2021,7 +2022,7 @@ void GFXDeleteTexture(int32_t texID)
    tex.texBindGroup = NULL;
 }
 
-void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds)
+void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds, uint32_t numSkinVerts)
 {
    SDLState::FrameModel blankModel = {};
    while (smState.models.size() <= modelId)
@@ -2042,13 +2043,14 @@ void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds,
    model.vertData = numVerts ? new ModelVertex[numVerts] : NULL;
    model.texVertData = numTexVerts ? new ModelTexVertex[numTexVerts] : NULL;
    model.indexData = numInds ? new uint16_t[numInds] : NULL;
-   model.skinData = numVerts ? new ModelSkinVertex[numVerts] : NULL;
+   model.skinData = numSkinVerts ? new ModelSkinVertex[numSkinVerts] : NULL;
    if (model.skinData)
-      memset(model.skinData, 0, sizeof(ModelSkinVertex) * numVerts);
+      memset(model.skinData, 0, sizeof(ModelSkinVertex) * numSkinVerts);
    
    model.numVerts = numVerts;
    model.numTexVerts = numTexVerts;
    model.numInds = numInds;
+   model.numSkinVerts = numSkinVerts;
    
    if (numVerts && verts)
       memcpy(model.vertData, verts, sizeof(ModelVertex) * numVerts);
@@ -2058,7 +2060,7 @@ void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds,
       memcpy(model.indexData, inds, sizeof(uint16_t) * numInds);
    if (skin && model.skinData)
    {
-      memcpy(model.skinData, skin, sizeof(ModelSkinVertex) * numVerts);
+      memcpy(model.skinData, skin, sizeof(ModelSkinVertex) * numSkinVerts);
    }
 }
 
@@ -2087,6 +2089,7 @@ void GFXClearModelData(uint32_t modelId)
    model.numVerts = 0;
    model.numTexVerts = 0;
    model.numInds = 0;
+   model.numSkinVerts = 0;
 }
 
 void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &proj, uint32_t flags)
@@ -2227,12 +2230,12 @@ void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec
    }
 }
 
-void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset, uint32_t indexOffset)
+void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset, uint32_t indexOffset, uint32_t skinOffset)
 {
    SDLState::FrameModel& model = smState.models[modelId];
    const size_t vertSize = sizeof(ModelVertex) * model.numVerts;
    const size_t texVertSize = sizeof(ModelTexVertex) * model.numTexVerts;
-   const size_t skinSize = sizeof(ModelSkinVertex) * model.numVerts;
+   const size_t skinSize = sizeof(ModelSkinVertex) * model.numSkinVerts;
    const size_t indexSize = AlignSize(sizeof(uint16_t) * model.numInds, sizeof(uint32_t));
    
    if (model.inFrame == false)
@@ -2257,7 +2260,7 @@ void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset,
        
    wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 0, model.vertOffset.buffer, model.vertOffset.offset + (vertOffset * sizeof(ModelVertex)), vertSize - (vertOffset * sizeof(ModelVertex)));
    wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 1, model.texVertOffset.buffer, model.texVertOffset.offset + (texOffset * sizeof(ModelTexVertex)), texVertSize - (texOffset * sizeof(ModelTexVertex)));
-   wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 2, model.skinOffset.buffer, model.skinOffset.offset + (vertOffset * sizeof(ModelSkinVertex)), skinSize - (vertOffset * sizeof(ModelSkinVertex)));
+   wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 2, model.skinOffset.buffer, model.skinOffset.offset + (skinOffset * sizeof(ModelSkinVertex)), skinSize - (skinOffset * sizeof(ModelSkinVertex)));
 }
 
 void GFXDrawModelVerts(uint32_t numVerts, uint32_t startVerts)

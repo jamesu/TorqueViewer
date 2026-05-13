@@ -447,6 +447,7 @@ public:
       //
       uint32_t mVertOffset;
       uint32_t mIndexOffset;
+      uint32_t mSkinVertOffset;
       //
       uint32_t mMeshFrame;     // verts frame offset
       uint32_t mMeshTexFrame;  // tverts frame offset
@@ -1768,6 +1769,7 @@ public:
       initMaterials();
       
       initRender();
+      initVertexBuffer();
       updateScaleAnimatonState();
       if (!mShape->mSequences.empty())
       {
@@ -1898,6 +1900,7 @@ public:
       uint32_t vertCount = 0;
       uint32_t indexCount = 0;
       uint32_t skinVertCount = 0;
+      uint32_t maxVertsInMesh = 0;
       
       for (RuntimeMeshInfo& rm : mRuntimeMeshInfos)
       {
@@ -1925,22 +1928,30 @@ public:
             rm.mRealVertsPerFrame = rm.mMesh->mVertsPerFrame;
             rm.mIndexCount = (uint32_t)bd->indices.size();
             indexCount += bd->indices.size();
+            maxVertsInMesh = std::max(maxVertsInMesh, rm.mRealVertsPerFrame);
          }
          else
          {
             rm.mRealVertsPerFrame = 0;
             rm.mIndexCount = 0;
          }
+
+         rm.mSkinVertOffset = 0;
       }
       
       modelVerts.resize(vertCount + skinVertCount);
       modelTexVerts.resize(vertCount + skinVertCount);
-      if (skinMeshList.size() != 0)
-      {
-         packedSkinVertices.resize(vertCount + skinVertCount);
-      }
+      if (maxVertsInMesh != 0 || skinMeshList.size() != 0)
+         packedSkinVertices.resize(maxVertsInMesh + skinVertCount);
       modelInds.resize(indexCount);
+
+      for (uint32_t i=0; i<maxVertsInMesh; i++)
+      {
+         packedSkinVertices[i].index[0] = 0;
+         packedSkinVertices[i].weights[0] = 1.0f;
+      }
       
+      uint32_t skinVertBase = maxVertsInMesh;
       skinVertCount = 0;
       indexCount = 0;
       for (RuntimeMeshInfo* rm : skinMeshList)
@@ -1950,12 +1961,13 @@ public:
          // Copy verts
          Dts3::EmitModelVertices(sd, &modelVerts[skinVertCount]);
          Dts3::EmitModelTexVertices(sd, &modelTexVerts[skinVertCount]);
-         Dts3::EmitPackedSkinVertices(sd, &packedSkinVertices[skinVertCount]);
+         Dts3::EmitPackedSkinVertices(sd, &packedSkinVertices[skinVertBase + skinVertCount]);
          memcpy(&modelInds[indexCount], &sd->indices[0], sizeof(uint16_t) * sd->indices.size());
          
          // Count & offsets
          rm->mVertOffset = skinVertCount;
          rm->mIndexOffset = indexCount;
+         rm->mSkinVertOffset = skinVertBase + skinVertCount;
          skinVertCount += rm->mVertCount;
          indexCount += rm->mIndexCount;
       }
@@ -1973,6 +1985,7 @@ public:
          // Count & offsets
          rm->mVertOffset = vertCount;
          rm->mIndexOffset = indexCount;
+         rm->mSkinVertOffset = 0;
          vertCount += rm->mVertCount;
          indexCount += rm->mIndexCount;
       }
@@ -1984,7 +1997,8 @@ public:
                        packedSkinVertices.empty() ? NULL : &packedSkinVertices[0],
                        (uint32_t)modelVerts.size(),
                        (uint32_t)modelTexVerts.size(),
-                       (uint32_t)modelInds.size());
+                       (uint32_t)modelInds.size(),
+                       (uint32_t)packedSkinVertices.size());
       initVB = true;
    }
    
@@ -1993,7 +2007,7 @@ public:
       if (!initVB)
          return;
       
-      GFXLoadModelData(0, NULL, NULL, NULL, NULL, 0, 0, 0);
+      GFXLoadModelData(0, NULL, NULL, NULL, NULL, 0, 0, 0, 0);
       initVB = false;
    }
    
@@ -2119,7 +2133,10 @@ public:
    
    void renderDecal(RuntimeMeshInfo& mi, RuntimeMeshInfo& smi, Dts3::BasicData* bd, Dts3::DecalData* dd)
    {
-      GFXSetModelVerts(0, 0, 0, 0);
+      const uint32_t meshVertOffset = smi.mVertOffset + (smi.mMeshFrame * smi.mRealVertsPerFrame);
+      const uint32_t meshTexOffset = smi.mVertOffset + (smi.mMeshTexFrame * smi.mRealVertsPerFrame);
+      const uint32_t meshSkinOffset = smi.mSkinVertOffset + (smi.mUseSkinData ? (smi.mMeshFrame * smi.mRealVertsPerFrame) : 0);
+      GFXSetModelVerts(0, meshVertOffset, meshTexOffset, smi.mIndexOffset, meshSkinOffset);
       GFXSetModelViewProjection(mModelMatrix, mViewMatrix, mProjectionMatrix, smi.mRenderFlags);
       GFXSetTSPipelineProps(mi.mMeshTexFrame, smi.mMeshTransformOffset, dd->texGenS[mi.mMeshFrame], dd->texGenT[mi.mMeshFrame]);
       
@@ -2147,14 +2164,17 @@ public:
          
          GFXDrawModelPrims(smi.mRealVertsPerFrame,
                            prim.numElements,
-                           mi.mIndexOffset + prim.firstElement,
-                           mi.mVertOffset + (smi.mMeshFrame * smi.mRealVertsPerFrame));
+                           prim.firstElement,
+                           0);
       }
    }
    
    void renderMesh(RuntimeMeshInfo& mi, Dts3::BasicData* bd, uint32_t drawVerts, uint32_t firstVert, uint32_t firstTVert, bool depthPeel=false)
    {
-      GFXSetModelVerts(0, 0, 0, 0);
+      const uint32_t meshVertOffset = mi.mVertOffset + firstVert;
+      const uint32_t meshTexOffset = mi.mVertOffset + firstTVert;
+      const uint32_t meshSkinOffset = mi.mSkinVertOffset + (mi.mUseSkinData ? firstVert : 0);
+      GFXSetModelVerts(0, meshVertOffset, meshTexOffset, mi.mIndexOffset, meshSkinOffset);
       GFXSetModelViewProjection(mModelMatrix, mViewMatrix, mProjectionMatrix, mi.mRenderFlags);
       GFXSetTSPipelineProps(mi.mMeshTexFrame, mi.mMeshTransformOffset, slm::vec4(0), slm::vec4(0));
       
@@ -2187,8 +2207,8 @@ public:
             
             GFXDrawModelPrims(mi.mRealVertsPerFrame,
                               prim.numElements,
-                              mi.mIndexOffset + prim.firstElement,
-                              mi.mVertOffset + (mi.mMeshFrame * mi.mRealVertsPerFrame));
+                              prim.firstElement,
+                              0);
          }
       }
    }

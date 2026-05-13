@@ -35,7 +35,7 @@ extern int32_t GFXLoadTexture(Bitmap* bmp, Palette*pal);
 extern int32_t GFXLoadTextureSet(uint32_t numBitmaps, Bitmap** bmps, Palette*pal);
 extern void GFXDeleteTexture(int32_t texID);
 //
-extern void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds);
+extern void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds, uint32_t numSkinVerts);
 extern void GFXClearModelData(uint32_t modelId);
 extern void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &proj, uint32_t flags=0);
 extern void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient);
@@ -47,7 +47,7 @@ extern void GFXBeginTSModelPipelineState(ModelPipelineState state, uint32_t tsGr
 extern void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID, float testVal, bool depthPeel, bool swapDepth);
 extern void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT);
 //
-extern void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset, uint32_t indexOffset);
+extern void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset, uint32_t indexOffset, uint32_t skinOffset);
 extern void GFXDrawModelVerts(uint32_t numVerts, uint32_t startVerts);
 extern void GFXDrawModelPrims(uint32_t numVerts, uint32_t numInds, uint32_t startInds, uint32_t startVerts);
 //
