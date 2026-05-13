@@ -1,190 +1,143 @@
-// Skinned instance model shader
-
-struct InstanceInfo {
-    // root transform offset
-    // ??
-    // ??
-    // ??
-    instanceConfig: vec4<i32>,
-
-    modelMat: mat3x4<f32>,
-    invModel: mat3x4<f32> 
-};
-
 struct CommonUniforms {
     projMat: mat4x4<f32>,
     viewMat: mat4x4<f32>,
     modelMat: mat4x4<f32>,
-    params1: vec4<f32>, // viewportScale.xy, lineWidth
-    params2: vec4<f32>, // alphaTestF
+    params1: vec4<f32>,
+    params2: vec4<f32>,
     lightPos: vec4<f32>,
     lightColor: vec4<f32>,
-
-    // transformsPerRow, 
-    // instanceLookupPerRow
-    globalInstanceConfig: vec4<i32>,
-
-    instances: array<InstanceInfo, 10>
+    squareTexCoords: array<vec4<f32>, 16>,
 };
 
-struct LightUnit {
-   diffuse: vec4<f32>,
-   ambient: vec4<f32>,
-   specular: vec4<f32>,
-   
-   position: vec4<f32>,
-   spotDirectionCutoff: vec4<f32>, // always 180
-   attenEnabled: vec4<f32> // const, lin, quad, enables
-};
-
-// Uniforms
-
-@group(0) @binding(0) var<uniform> commonUniforms: CommonUniforms;
-
-// Material
+@group(0) @binding(0)
+var<uniform> commonUniforms: CommonUniforms;
 
 @group(1) @binding(0)
-var texs0: texture_2d<f32>; // diffuse
+var diffuseTex: texture_2d<f32>;
+
 @group(1) @binding(1)
-var texs1: texture_2d<f32>; // emap alpha
-@group(1) @binding(2)
-var texs2: texture_2d<f32>; // dmap
-@group(1) @binding(3)
-var texs3: texture_2d<f32>; // emap
-@group(1) @binding(4)
-var samplers0: sampler;
-@group(1) @binding(5)
-var samplers1: sampler;
-@group(1) @binding(6)
-var samplers2: sampler;
-@group(1) @binding(7)
-var samplers3: sampler;
+var diffuseSampler: sampler;
 
-// Transforms
-
-@group(2) @binding(0) var transformTex: texture_2d<f32>; // transformed skinned mesh (NOT global shape nodes)
+@group(2) @binding(0)
+var transformTex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) aPosition: vec3<f32>,
     @location(1) aNormal: vec3<f32>,
     @location(2) aTexCoord0: vec2<f32>,
-    @location(3) aBoneIndex0: vec4<u32>,   // influences 0..3
-    @location(4) aBoneWeight0: vec4<f32>,
-    @location(5) aBoneIndex1: vec4<u32>,   // influences 4..7
+    @location(3) aBoneIndex0: vec4<u32>,
+    @location(4) aBoneIndex1: vec4<u32>,
+    @location(5) aBoneWeight0: vec4<f32>,
     @location(6) aBoneWeight1: vec4<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) vTexCoord0: vec2<f32>,
-    @location(1) vColor0: vec4<f32>,
-    @location(2) vNormal0: vec4<f32>,
+    @location(1) vLighting: vec3<f32>,
 };
 
 struct FragmentOutput {
     @location(0) Color: vec4<f32>,
 };
 
-fn expandToMat4(m: mat3x4<f32>) -> mat4x4<f32> {
-    return mat4x4<f32>(
-        vec4<f32>(m[0].xyz, 0.0),                     // column 0
-        vec4<f32>(m[1].xyz, 0.0),                     // column 1
-        vec4<f32>(m[2].xyz, 0.0),                     // column 2
-        vec4<f32>(m[0].w, m[1].w, m[2].w, 1.0)        // column 3 (homogeneous row)
-    );
+fn getTransformTexelCoord(texelIndex: u32) -> vec2<i32> {
+    let texWidth = max(u32(commonUniforms.params1.y), 1u);
+    return vec2<i32>(i32(texelIndex % texWidth), i32(texelIndex / texWidth));
 }
 
-fn texelCoord1D(index: u32, texWidth: u32) -> vec2<i32> {
-    let x = i32(index % texWidth);
-    let y = i32(index / texWidth);
-    return vec2<i32>(x, y);
+fn loadTransformRow(transformIndex: u32, rowIndex: u32) -> vec4<f32> {
+    let texelIndex = transformIndex * 3u + rowIndex;
+    return textureLoad(transformTex, getTransformTexelCoord(texelIndex), 0);
 }
 
-fn loadAffine3x4(
-    matrixIndex: u32,
-    texWidth: u32
-) -> mat3x4<f32> {
-    let baseTexel = matrixIndex * 3u;
+fn transformPoint(transformIndex: u32, position: vec3<f32>) -> vec3<f32> {
+    let p = vec4<f32>(position, 1.0);
+    let row0 = loadTransformRow(transformIndex, 0u);
+    let row1 = loadTransformRow(transformIndex, 1u);
+    let row2 = loadTransformRow(transformIndex, 2u);
+    return vec3<f32>(dot(row0, p), dot(row1, p), dot(row2, p));
+}
 
-    let row0 = textureLoad(transformTex, texelCoord1D(baseTexel + 0u, texWidth), 0);
-    let row1 = textureLoad(transformTex, texelCoord1D(baseTexel + 1u, texWidth), 0);
-    let row2 = textureLoad(transformTex, texelCoord1D(baseTexel + 2u, texWidth), 0);
+fn transformNormal(transformIndex: u32, normal: vec3<f32>) -> vec3<f32> {
+    let row0 = loadTransformRow(transformIndex, 0u).xyz;
+    let row1 = loadTransformRow(transformIndex, 1u).xyz;
+    let row2 = loadTransformRow(transformIndex, 2u).xyz;
+    return vec3<f32>(dot(row0, normal), dot(row1, normal), dot(row2, normal));
+}
 
-    return mat3x4<f32>(row0, row1, row2);
+fn applySkinBlock(
+    baseTransformIndex: u32,
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    boneIndices: vec4<u32>,
+    boneWeights: vec4<f32>,
+    posOut: ptr<function, vec3<f32>>,
+    normalOut: ptr<function, vec3<f32>>,
+    totalWeightOut: ptr<function, f32>
+) {
+    if (boneWeights.x > 0.0) {
+        *posOut += transformPoint(baseTransformIndex + boneIndices.x, position) * boneWeights.x;
+        *normalOut += transformNormal(baseTransformIndex + boneIndices.x, normal) * boneWeights.x;
+        *totalWeightOut += boneWeights.x;
+    }
+    if (boneWeights.y > 0.0) {
+        *posOut += transformPoint(baseTransformIndex + boneIndices.y, position) * boneWeights.y;
+        *normalOut += transformNormal(baseTransformIndex + boneIndices.y, normal) * boneWeights.y;
+        *totalWeightOut += boneWeights.y;
+    }
+    if (boneWeights.z > 0.0) {
+        *posOut += transformPoint(baseTransformIndex + boneIndices.z, position) * boneWeights.z;
+        *normalOut += transformNormal(baseTransformIndex + boneIndices.z, normal) * boneWeights.z;
+        *totalWeightOut += boneWeights.z;
+    }
+    if (boneWeights.w > 0.0) {
+        *posOut += transformPoint(baseTransformIndex + boneIndices.w, position) * boneWeights.w;
+        *normalOut += transformNormal(baseTransformIndex + boneIndices.w, normal) * boneWeights.w;
+        *totalWeightOut += boneWeights.w;
+    }
 }
 
 @vertex
-fn mainVert(input: VertexInput,
-            @builtin(instance_index) instanceId: u32
-    ) -> VertexOutput {
-    let globalTransformWidth = commonUniforms.globalInstanceConfig.x;
-    let globalLookupWidth = commonUniforms.globalInstanceConfig.y;
-    let inst = commonUniforms.instances[instanceId];
-
-    let normal: vec3<f32> = normalize((expandToMat4(inst.modelMat) * vec4<f32>(input.aNormal, 0.0)).xyz);
-    let instanceBase = inst.instanceConfig.x;
-
+fn mainVert(input: VertexInput) -> VertexOutput {
+    let transformOffset = u32(commonUniforms.params1.x);
     var skinnedPos = vec3<f32>(0.0);
-    var skinnedNrm = vec3<f32>(0.0);
+    var skinnedNormal = vec3<f32>(0.0);
+    var totalWeight = 0.0;
 
-    // First set
-    for (var k: u32 = 0u; k < 4u; k = k + 1u)
-    {
-        let w = input.aBoneWeight0[k];
-        if (w > 0.0) {
-            let localBone = input.aBoneIndex0[k];
-            let m = loadAffine3x4(instanceBase + localBone, globalTransformWidth);
+    applySkinBlock(transformOffset, input.aPosition, input.aNormal, input.aBoneIndex0, input.aBoneWeight0, &skinnedPos, &skinnedNormal, &totalWeight);
+    applySkinBlock(transformOffset, input.aPosition, input.aNormal, input.aBoneIndex1, input.aBoneWeight1, &skinnedPos, &skinnedNormal, &totalWeight);
 
-            skinnedPos += transformPoint(m, pos) * w;
-            skinnedNrm += transformVector(m, nrm) * w;
-        }
+    if (totalWeight == 0.0) {
+        skinnedPos = transformPoint(transformOffset, input.aPosition);
+        skinnedNormal = transformNormal(transformOffset, input.aNormal);
+    } else if (totalWeight < 1.0) {
+        let remainder = 1.0 - totalWeight;
+        skinnedPos += transformPoint(transformOffset, input.aPosition) * remainder;
+        skinnedNormal += transformNormal(transformOffset, input.aNormal) * remainder;
     }
 
-    // Second set
-    for (var k: u32 = 0u; k < 4u; k = k + 1u)
-    {
-        let w = input.aBoneWeight1[k];
-        if (w > 0.0) {
-            let localBone = input.aBoneIndex1[k];
-            let m = loadAffine3x4(instanceBase + localBone, globalTransformWidth);
-
-            skinnedPos += transformPoint(m, pos) * w;
-            skinnedNrm += transformVector(m, nrm) * w;
-        }
-    }
-
-    let nrm = normalize((expandToMat4(inst.modelMat) * vec4<f32>(skinnedNrm, 0.0)).xyz);
-    let lightDir: vec3<f32> = normalize(commonUniforms.lightPos.xyz);
-    let NdotL: f32 = max(dot(normal, lightDir), 0.0);
-    let diffuse = vec4<f32>(commonUniforms.lightColor.xyz, 1.0);
-
-    let mvpMat: mat4x4<f32> = commonUniforms.projMat * commonUniforms.viewMat * expandToMat4(inst.modelMat);
+    let worldPos = commonUniforms.modelMat * vec4<f32>(skinnedPos, 1.0);
+    let worldNormal = normalize((commonUniforms.modelMat * vec4<f32>(normalize(skinnedNormal), 0.0)).xyz);
+    let lightDir = normalize(commonUniforms.lightPos.xyz - worldPos.xyz);
+    let ndotl = max(dot(worldNormal, lightDir), 0.0);
 
     var output: VertexOutput;
-    output.position = mvpMat * vec4<f32>(input.aPosition, 1.0);
+    output.position = commonUniforms.projMat * commonUniforms.viewMat * worldPos;
     output.vTexCoord0 = input.aTexCoord0;
-    output.vColor0 = vec4<f32>(1.0, 1.0, 1.0, 1.0); // Set to white color as per original shader
-    output.vColor0.a = 1.0;
-    output.vNormal0 = vec4<f32>(nrm.xyz, 1.0);
-
+    output.vLighting = vec3<f32>(0.2) + (commonUniforms.lightColor.rgb * ndotl);
     return output;
 }
 
 @fragment
 fn mainFrag(input: VertexOutput) -> FragmentOutput {
-    var color: vec4<f32> = textureSample(texs0, samplers0, input.vTexCoord0);
+    let texColor = textureSample(diffuseTex, diffuseSampler, input.vTexCoord0);
 
-    if (color.a > commonUniforms.params2.x) {
+    if (texColor.a < commonUniforms.params2.x) {
         discard;
     }
 
-    var outputColor: vec4<f32>;
-    outputColor.r = color.r * input.vColor0.r * input.vColor0.a;
-    outputColor.g = color.g * input.vColor0.g * input.vColor0.a;
-    outputColor.b = color.b * input.vColor0.b * input.vColor0.a;
-    outputColor.a = color.a;
-
     var out: FragmentOutput;
-    out.Color = outputColor;
+    out.Color = vec4<f32>(texColor.rgb * input.vLighting, texColor.a);
     return out;
 }

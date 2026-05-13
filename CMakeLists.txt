@@ -4,11 +4,6 @@ cmake_minimum_required(VERSION 3.10)
 project(TorqueViewer)
 
 function(generate_escaped_string_header INPUT_FILE OUTPUT_HEADER CONST_NAME)
-    # Check if the output header exists
-    if(EXISTS "${OUTPUT_HEADER}")
-        return()
-    endif()
-
     # Read the content of the input file
     file(READ "${INPUT_FILE}" FILE_CONTENT)
 

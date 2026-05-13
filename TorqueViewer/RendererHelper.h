@@ -39,6 +39,7 @@ extern void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void
 extern void GFXClearModelData(uint32_t modelId);
 extern void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &proj, uint32_t flags=0);
 extern void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient);
+extern void GFXSetModelTransformTexture(int32_t texID);
 //
 extern void GFXSetTSMaterialResources(uint32_t tsGroupID, int32_t diffuseTexID, int32_t emapAlphaTexID, int32_t emapTexID, int32_t dmapID);
 extern void GFXSetITRMaterialResources(uint32_t itrGroupID, int32_t baseTexID, int32_t emapTexID, int32_t lightmapTexID);
@@ -55,4 +56,3 @@ extern void GFXDrawLine(slm::vec3 start, slm::vec3 end, slm::vec4 color, float w
 //
 extern void GFXSetTerrainResources(uint32_t terrainID, int32_t matTexGroupID, int32_t heightMapTexID, int32_t gridMapTexID, int32_t lightmapTexGroupID);
 extern void GFXBeginTerrainPipelineState(TerrainPipelineState state, uint32_t terrainID, float squareSize, float gridX, float gridY, const slm::vec4* matCoords);
-

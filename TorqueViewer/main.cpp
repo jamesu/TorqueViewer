@@ -224,7 +224,10 @@ public:
          {
             MaterialList::Material& mat = mMaterialList->mMaterials[i];
             ActiveMaterial& amat = mActiveMaterials[i];
-            // TOFIX loadTexture((const char*)mat.mFilename, amat.tex);
+            if (loadTexture(mat.name.c_str(), amat.tex))
+            {
+               amat.texGroupID = amat.tex.texID;
+            }
          }
       }
    }
@@ -532,14 +535,15 @@ public:
       
       uint32_t getRequiredDim()
       {
-         uint32_t baseSize = static_cast<uint32_t>(std::pow(2, std::ceil(std::log2(std::sqrt(memoryUsed)))));
+         uint32_t requiredTexels = std::max<uint32_t>(memoryUsed * 3, 1);
+         uint32_t baseSize = static_cast<uint32_t>(std::pow(2, std::ceil(std::log2(std::sqrt((double)requiredTexels)))));
          return std::min<uint32_t>(baseSize, 256);
       }
       
       uint32_t allocTransforms(uint32_t numTransforms)
       {
          uint32_t offset = memoryUsed;
-         memoryUsed += sizeof(T) * numTransforms;
+         memoryUsed += numTransforms;
          return offset;
       }
       
@@ -554,13 +558,14 @@ public:
                delete[] updateMem;
             }
             
-            updateMem = new T[pow2Size * pow2Size];
-            memset(updateMem, 0, (pow2Size * pow2Size) * sizeof(T));
+            uint32_t transformCapacity = std::max<uint32_t>((pow2Size * pow2Size) / 3, 1);
+            updateMem = new T[transformCapacity];
+            memset(updateMem, 0, transformCapacity * sizeof(T));
             if (initialMem)
             {
                memcpy(updateMem, initialMem, initialTransformSize * sizeof(T));
             }
-            memorySize = (pow2Size * pow2Size);
+            memorySize = transformCapacity;
             
             if (texID >= 0)
             {
@@ -586,6 +591,15 @@ public:
       slm::vec4 r2;
       slm::vec4 r3;
    };
+
+   static Matrix43 packMatrix43(const slm::mat4& mat)
+   {
+      Matrix43 packed = {};
+      packed.r1 = slm::vec4(mat[0].x, mat[1].x, mat[2].x, mat[3].x);
+      packed.r2 = slm::vec4(mat[0].y, mat[1].y, mat[2].y, mat[3].y);
+      packed.r3 = slm::vec4(mat[0].z, mat[1].z, mat[2].z, mat[3].z);
+      return packed;
+   }
    
    struct LookupRegister
    {
@@ -636,15 +650,11 @@ public:
             // Check all the meshes in this object
             for (uint32_t mi=0; mi<obj.numMeshes; mi++)
             {
-               Dts3::Mesh& m = mShape->mMeshes[mi];
+               Dts3::Mesh& m = mShape->mMeshes[obj.firstMesh + mi];
                if (m.mType == Dts3::Mesh::T_Skin)
                {
                   Dts3::SkinData* skinData = m.getSkinData();
-                  subShapeTransforms += skinData->nodeTransforms.size() + 1;
-               }
-               else if (m.mType != Dts3::Mesh::T_Null)
-               {
-                  subShapeTransforms++;
+                  subShapeTransforms += skinData->nodeTransforms.size();
                }
             }
          }
@@ -670,33 +680,6 @@ public:
       mRuntimeDetailInfos.resize(mShape->mDetailLevels.size());
       mRuntimeSubShapeInfos.resize(mShape->mSubshapes.size());
       
-      std::vector<slm::mat4> meshTransforms;
-      std::vector<uint32_t> boneIndexes;
-      
-      // Load meshes
-      uint32_t count = 0;
-      for (RuntimeMeshInfo& rm : mRuntimeMeshInfos)
-      {
-         rm.mMesh = &mShape->mMeshes[count];
-         rm.mMeshTransformOffset = meshTransforms.size();
-         
-         Dts3::SkinData* sd = rm.mMesh->getSkinData();
-         if (sd)
-         {
-            for (slm::mat4 mt : sd->nodeTransforms)
-            {
-               // TODO: transpose?
-               meshTransforms.push_back(mt);
-            }
-            for (uint32_t idx : sd->nodeIndex)
-            {
-               boneIndexes.push_back(idx);
-            }
-         }
-         
-         count++;
-      }
-      
       // Load base skin transforms texture
       nodeMeshTransformsTex.reset();
       
@@ -705,6 +688,38 @@ public:
       {
          mBaseTextureTransform = nodeMeshTransformsTex.allocTransforms(maxTransforms);
          nodeMeshTransformsTex.ensureValid(maxTransforms, NULL);
+      }
+
+      for (size_t i=0; i<mRuntimeMeshInfos.size(); i++)
+      {
+         mRuntimeMeshInfos[i].mMesh = &mShape->mMeshes[i];
+         mRuntimeMeshInfos[i].mMeshTransformOffset = mBaseTextureTransform;
+      }
+      
+      for (Dts3::Object& obj : mShape->mObjects)
+      {
+         uint32_t objectTransformOffset = mBaseTextureTransform;
+         if (obj.node >= 0)
+         {
+            objectTransformOffset += 1 + (uint32_t)obj.node;
+         }
+         
+         for (int meshIdx = 0; meshIdx < obj.numMeshes; meshIdx++)
+         {
+            RuntimeMeshInfo& rm = mRuntimeMeshInfos[obj.firstMesh + meshIdx];
+            rm.mMeshTransformOffset = objectTransformOffset;
+            
+            Dts3::SkinData* sd = rm.mMesh->getSkinData();
+            if (sd && !sd->nodeTransforms.empty())
+            {
+               rm.mMeshTransformOffset = nodeMeshTransformsTex.allocTransforms((uint32_t)sd->nodeTransforms.size());
+            }
+         }
+      }
+      
+      if (nodeMeshTransformsTex.memoryUsed > maxTransforms)
+      {
+         nodeMeshTransformsTex.ensureValid(nodeMeshTransformsTex.memoryUsed, NULL);
       }
       
       initRenderMaterials();
@@ -1163,7 +1178,36 @@ public:
    
    void updateTransformTexture()
    {
-      // TODO
+      if (nodeMeshTransformsTex.texID < 0 || nodeMeshTransformsTex.updateMem == NULL || nodeMeshTransformsTex.memoryUsed == 0)
+         return;
+      
+      memset(nodeMeshTransformsTex.updateMem, 0, nodeMeshTransformsTex.memorySize * sizeof(Matrix43));
+      nodeMeshTransformsTex.updateMem[mBaseTextureTransform] = packMatrix43(slm::mat4(1.0f));
+      
+      for (size_t i=0; i<mNodeTransforms.size(); i++)
+      {
+         nodeMeshTransformsTex.updateMem[mBaseTextureTransform + 1 + i] = packMatrix43(mNodeTransforms[i]);
+      }
+      
+      for (RuntimeMeshInfo& rm : mRuntimeMeshInfos)
+      {
+         Dts3::SkinData* sd = rm.mMesh->getSkinData();
+         if (!sd)
+            continue;
+         
+         for (size_t i=0; i<sd->nodeTransforms.size(); i++)
+         {
+            slm::mat4 finalTransform = sd->nodeTransforms[i];
+            if (i < sd->nodeIndex.size() && sd->nodeIndex[i] < mNodeTransforms.size())
+            {
+               finalTransform = mNodeTransforms[sd->nodeIndex[i]] * sd->nodeTransforms[i];
+            }
+            nodeMeshTransformsTex.updateMem[rm.mMeshTransformOffset + i] = packMatrix43(finalTransform);
+         }
+      }
+      
+      GFXUpdateCustomTextureAligned(nodeMeshTransformsTex.texID, nodeMeshTransformsTex.updateMem);
+      GFXSetModelTransformTexture(nodeMeshTransformsTex.texID);
    }
    
    void animateNodes(Dts3::SubShape& subShape)
@@ -1443,6 +1487,8 @@ public:
       
       initShapeObjects();
       
+      initRender();
+      
       // Setup default pose for nodes
       animate(0);
    }
@@ -1587,7 +1633,7 @@ public:
          if (bd)
          {
             rm.mRealVertsPerFrame = rm.mMesh->mVertsPerFrame;
-            rm.mIndexCount = indexCount;
+            rm.mIndexCount = (uint32_t)bd->indices.size();
             indexCount += bd->indices.size();
          }
          else
@@ -1641,14 +1687,15 @@ public:
          indexCount += rm->mIndexCount;
       }
       
-      if (packedSkinVertices.size() == 0)
-      {
-         GFXLoadModelData(0, &modelVerts[0], &modelTexVerts[0], &modelInds, &packedSkinVertices, modelVerts.size(), modelTexVerts.size(), modelInds.size());
-      }
-      else
-      {
-         GFXLoadModelData(0, &modelVerts[0], &modelTexVerts[0], &modelInds, NULL, modelVerts.size(), modelTexVerts.size(), modelInds.size());
-      }
+      GFXLoadModelData(0,
+                       modelVerts.empty() ? NULL : &modelVerts[0],
+                       modelTexVerts.empty() ? NULL : &modelTexVerts[0],
+                       modelInds.empty() ? NULL : &modelInds[0],
+                       packedSkinVertices.empty() ? NULL : &packedSkinVertices[0],
+                       (uint32_t)modelVerts.size(),
+                       (uint32_t)modelTexVerts.size(),
+                       (uint32_t)modelInds.size());
+      initVB = true;
    }
    
    void clearVertexBuffer()
@@ -2103,21 +2150,42 @@ public:
    
    void nodeTree(int32_t nodeIdx)
    {
-      #if 0
       if (nodeIdx < 0)
+      {
+         for (int32_t i=0; i<mShape->mNodes.size(); i++)
+         {
+            if (mShape->mNodes[i].parent < 0)
+            {
+               nodeTree(i);
+            }
+         }
          return;
-      
-      Shape::NodeChildInfo info = mShape->mNodeChildren[nodeIdx+1];
+      }
+
       uint32_t baseFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
-      
-      bool visDetail = (nodeIdx == mShape->mDetails[mViewer.mCurrentDetail].rootNode);
+
+      bool visDetail = false;
+      if (mViewer.mCurrentDetail >= 0 && mViewer.mCurrentDetail < mShape->mDetailLevels.size())
+      {
+         Dts3::DetailLevel& detail = mShape->mDetailLevels[mViewer.mCurrentDetail];
+         if (detail.subshape >= 0 && detail.subshape < mShape->mSubshapes.size())
+         {
+            Dts3::SubShape& subShape = mShape->mSubshapes[detail.subshape];
+            int32_t endNode = subShape.firstNode + subShape.numNodes;
+            visDetail = nodeIdx >= subShape.firstNode && nodeIdx < endNode;
+         }
+      }
       
       if (visDetail)
       {
          ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 1.0);
       }
-      
-      bool vis = ImGui::TreeNodeEx(mShape->getName(mShape->mNodes[nodeIdx].name), info.numChildren > 0 ? baseFlags : baseFlags|ImGuiTreeNodeFlags_Leaf);
+
+      bool hasChildren = mShape->mNodes[nodeIdx].firstChild >= 0;
+      bool hasObjects = mShape->mNodes[nodeIdx].firstObject >= 0;
+      bool vis = ImGui::TreeNodeEx(
+         mShape->getName(mShape->mNodes[nodeIdx].name),
+         (hasChildren || hasObjects) ? baseFlags : (baseFlags | ImGuiTreeNodeFlags_Leaf));
       if (ImGui::IsItemClicked())
       {
          mHighlightNodeIdx = nodeIdx;
@@ -2125,9 +2193,18 @@ public:
       
       if (vis)
       {
-         for (int32_t i=0; i<info.numChildren; i++)
+         for (int32_t objectIdx = mShape->mNodes[nodeIdx].firstObject;
+              objectIdx >= 0;
+              objectIdx = mShape->mObjects[objectIdx].nextSibling)
          {
-            nodeTree(mShape->mNodeChildIds[info.firstChild+i]);
+            ImGui::BulletText("Object: %s", mShape->getName(mShape->mObjects[objectIdx].name));
+         }
+
+         for (int32_t childIdx = mShape->mNodes[nodeIdx].firstChild;
+              childIdx >= 0;
+              childIdx = mShape->mNodes[childIdx].nextSibling)
+         {
+            nodeTree(childIdx);
          }
          ImGui::TreePop();
       }
@@ -2136,7 +2213,6 @@ public:
       {
          ImGui::PopStyleVar(1);
       }
-      #endif
    }
    
 };
@@ -2482,9 +2558,9 @@ int MainState::loop()
       
       ImGui::Begin("Browse");
       ImGui::Columns(2);
-      ImGui::ListBox("##bvols", &selectedVolumeIdx, &cVolumeList[0], cVolumeList.size());
+      ImGui::ListBox("##bvols", &selectedVolumeIdx, cVolumeList.data(), cVolumeList.size());
       ImGui::NextColumn();
-      ImGui::ListBox("##bfiles", &selectedFileIdx, &cFileList[0], cFileList.size());
+      ImGui::ListBox("##bfiles", &selectedFileIdx, cFileList.data(), cFileList.size());
       ImGui::End();
       
       GFXEndFrame();
