@@ -1034,7 +1034,7 @@ public:
    inline slm::vec3 getSequenceTranslation(Dts3::Sequence& sequence, int32_t frame, int32_t rotIndex)
    {
       // NOTE: this should be stored [n1f1 n1f2 n2f1 n2f2 ...]
-      return mNodeTranslations[sequence.baseRot + (sequence.numKeyFrames * rotIndex) + frame];
+      return mNodeTranslations[sequence.baseTrans + (sequence.numKeyFrames * rotIndex) + frame];
    }
    
    inline Quat16 getSequenceRotation(Dts3::Sequence& sequence, int32_t frame, int32_t rotIndex)

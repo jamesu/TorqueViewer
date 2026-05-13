@@ -695,6 +695,27 @@ public:
    void clear()
    {
       nodeMeshTransformsTex.reset();
+      mThreads.clear();
+      mSortedThreads.clear();
+      mTransitionThreads.clear();
+      mThreadActive.clear();
+      mRuntimeMeshInfos.clear();
+      mRuntimeObjectInfos.clear();
+      mRuntimeIflMaterialInfos.clear();
+      mRuntimeDecalInfos.clear();
+      mRuntimeDetailInfos.clear();
+      mRuntimeSubShapeInfos.clear();
+      mRuntimeNodeCallbacks.clear();
+      mNodeTransforms.clear();
+      mLocalNodeTransforms.clear();
+      mActiveRotations.clear();
+      mActiveTranslations.clear();
+      mActiveUniformScales.clear();
+      mActiveAlignedScales.clear();
+      mActiveArbitraryScales.clear();
+      mGroundThreadIdx = -1;
+      mCurrentDetail = -1;
+      mTriggerStateFlags = 0;
       
       clearVertexBuffer();
       clearTextures();
@@ -748,6 +769,18 @@ public:
       mRuntimeDecalInfos.resize(mShape->mDecals.size());
       mRuntimeDetailInfos.resize(mShape->mDetailLevels.size());
       mRuntimeSubShapeInfos.resize(mShape->mSubshapes.size());
+      mLocalNodeTransforms.resize(mShape->mNodes.size(), slm::mat4(1.0f));
+      mNodeTransforms.resize(mShape->mNodes.size(), slm::mat4(1.0f));
+      mActiveRotations.resize(mShape->mNodes.size());
+      mActiveTranslations.resize(mShape->mNodes.size());
+      mActiveUniformScales.resize(mShape->mNodes.size(), 1.0f);
+      mActiveAlignedScales.resize(mShape->mNodes.size(), slm::vec3(1.0f));
+      mActiveArbitraryScales.resize(mShape->mNodes.size());
+      for (size_t i=0; i<mRuntimeSubShapeInfos.size(); i++)
+      {
+         mRuntimeSubShapeInfos[i].subShapeIndex = (uint32_t)i;
+         mRuntimeSubShapeInfos[i].dirtyFlags = RuntimeSubShapeInfo::AllDirty;
+      }
       
       // Load base skin transforms texture
       nodeMeshTransformsTex.reset();
@@ -857,6 +890,8 @@ public:
       {
          if (mThreads[num].index < 0)
             continue;
+         if (mThreads[num].sequenceIdx < 0 || mThreads[num].sequenceIdx >= mShape->mSequences.size())
+            continue;
          func(mThreads[num]);
       }
    }
@@ -866,6 +901,8 @@ public:
       for (uint32_t num : mSortedThreads)
       {
          if (mThreads[num].index < 0)
+            continue;
+         if (mThreads[num].sequenceIdx < 0 || mThreads[num].sequenceIdx >= mShape->mSequences.size())
             continue;
          if (!func(mThreads[num]))
          {
@@ -891,7 +928,8 @@ public:
       thread.index = mThreads.size();
       mThreads.push_back(thread);
       mSortedThreads.push_back(thread.index);
-      return (uint32_t)mThreads.size();
+      mThreadActive.push_back(false);
+      return thread.index;
    }
    
    static constexpr float kSequenceLoopEnd = 0.9999f;
@@ -904,9 +942,14 @@ public:
       if (sequenceIdx < 0)
       {
          thread.sequenceIdx = -1;
+         thread.pos = 0.0f;
          thread.priority = 0;
+         thread.playing = false;
+         thread.timeScale = 0.0f;
          thread.makePath = false;
          thread.path = Dts3::ThreadPath();
+         if (idx < mThreadActive.size())
+            mThreadActive[idx] = false;
       }
       else
       {
@@ -921,9 +964,16 @@ public:
             thread.pos = kSequenceLoopEnd;
          }
          
+         thread.playing = true;
+         thread.timeScale = 1.0f;
          selectKeyFrames(pos, sequence, thread.keyInfo);
+         if (idx < mThreadActive.size())
+            mThreadActive[idx] = true;
       }
-      
+
+      sortThreads();
+      updateScaleAnimatonState();
+      setDirty(RuntimeSubShapeInfo::AllDirty);
    }
    
    void transitionToSequence(Dts3::Thread& thread, int32_t sequenceIdx, float pos, float duration, bool playing)
@@ -1012,6 +1062,8 @@ public:
       clearTransition(thread);
       
       mThreads[idx].index = -1;
+      if (idx < mThreadActive.size())
+         mThreadActive[idx] = false;
       
       setDirty(RuntimeSubShapeInfo::AllDirty);
       updateScaleAnimatonState();
@@ -1114,14 +1166,27 @@ public:
                 [&](size_t i, size_t j) {
         Dts3::Thread const& a = mThreads[i];
         Dts3::Thread const& b = mThreads[j];
-         Dts3::Sequence const& aSeq = mShape->mSequences[a.sequenceIdx];
-         Dts3::Sequence const& bSeq = mShape->mSequences[b.sequenceIdx];
          
          // inactive goes on end
          if (a.index < 0)
          {
             return false;
          }
+         if (b.index < 0)
+         {
+            return true;
+         }
+         if (a.sequenceIdx < 0 || a.sequenceIdx >= mShape->mSequences.size())
+         {
+            return false;
+         }
+         if (b.sequenceIdx < 0 || b.sequenceIdx >= mShape->mSequences.size())
+         {
+            return true;
+         }
+
+         Dts3::Sequence const& aSeq = mShape->mSequences[a.sequenceIdx];
+         Dts3::Sequence const& bSeq = mShape->mSequences[b.sequenceIdx];
 
          const bool aBlend = aSeq.testFlags(Dts3::Sequence::Blend);
          const bool bBlend = bSeq.testFlags(Dts3::Sequence::Blend);
@@ -1153,6 +1218,7 @@ public:
    void updateScaleAnimatonState()
    {
       // NOTE: this adds on a bunch of scale computations if enabled
+      mApplyScaleTransforms = false;
       forEachSortedThread([&](Dts3::Thread& thread){
          if (thread.sequenceIdx >= 0)
          {
@@ -1164,8 +1230,6 @@ public:
             }
          }
       });
-      
-      mApplyScaleTransforms = false;
    }
    
    float getThreadTime(Dts3::Thread& thread)
@@ -1197,6 +1261,30 @@ public:
    
    void advanceThreadPos(Dts3::Thread& thread, float pos)
    {
+      if (thread.sequenceIdx < 0 || thread.sequenceIdx >= mShape->mSequences.size())
+         return;
+
+      Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+      thread.pos += pos;
+
+      if (sequence.testFlags(Dts3::Sequence::Cyclic))
+      {
+         while (thread.pos < 0.0f)
+            thread.pos += 1.0f;
+         while (thread.pos >= 1.0f)
+            thread.pos -= 1.0f;
+         if (thread.pos > kSequenceLoopEnd)
+            thread.pos = kSequenceLoopEnd;
+      }
+      else
+      {
+         thread.pos = std::clamp(thread.pos, 0.0f, 1.0f);
+         if (thread.pos >= 1.0f || thread.pos <= 0.0f)
+            thread.playing = false;
+      }
+
+      selectKeyFrames(thread.pos, sequence, thread.keyInfo);
+      setDirty(RuntimeSubShapeInfo::AllDirty);
    }
    
    void advanceThreads(float dt)
@@ -1207,7 +1295,10 @@ public:
       
       for (Dts3::Thread& thread : mThreads)
       {
-         if (mThreadActive[thread.index])
+         if (thread.index >= 0 &&
+             thread.index < mThreadActive.size() &&
+             mThreadActive[thread.index] &&
+             thread.playing)
          {
             advanceThreadTime(thread, dt);
          }
@@ -1295,10 +1386,127 @@ public:
       // - Apply basic transforms unless hands-off is set for node
       // - Apply scale transforms unless hands-off is set for node
       // - Invoke node callbacks for nodes set
-      // - Apply blend tranaforms (basically: added on top)
+      // - Apply blend transforms (basically: added on top)
       // - Apply transition transforms to marked transition nodes
       // - Apply final transform (based on parent node)
-      mNodeTransforms.resize(mShape->mNodes.size());
+      const size_t nodeCount = mShape->mNodes.size();
+      mLocalNodeTransforms.resize(nodeCount, slm::mat4(1.0f));
+      mNodeTransforms.resize(nodeCount, slm::mat4(1.0f));
+      std::vector<slm::quat> nodeRotations(nodeCount, slm::quat(0, 0, 0, 1));
+      std::vector<slm::vec3> nodeTranslations(nodeCount, slm::vec3(0.0f));
+      std::vector<slm::vec3> nodeScales(nodeCount, slm::vec3(1.0f));
+
+      const int32_t firstNode = std::max(subShape.firstNode, 0);
+      const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)nodeCount);
+      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
+      {
+         if (nodeIdx < mShape->mDefaultRotations.size())
+            nodeRotations[nodeIdx] = mShape->mDefaultRotations[nodeIdx].toQuat();
+         if (nodeIdx < mShape->mDefaultTranslations.size())
+            nodeTranslations[nodeIdx] = mShape->mDefaultTranslations[nodeIdx];
+      }
+
+      std::vector<bool> rotationSet(nodeCount, false);
+      std::vector<bool> translationSet(nodeCount, false);
+      std::vector<bool> scaleSet(nodeCount, false);
+
+      forEachSortedThread([&](Dts3::Thread& thread){
+         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+         int32_t rotFrame = 0;
+         int32_t transFrame = 0;
+         int32_t scaleFrame = 0;
+
+         for (int32_t nodeIdx = sequence.mattersRot.findFirst();
+              nodeIdx >= 0;
+              nodeIdx = sequence.mattersRot.findNext(nodeIdx))
+         {
+            if (nodeIdx < firstNode || nodeIdx >= endNode)
+               continue;
+
+            if (!rotationSet[nodeIdx])
+            {
+               slm::quat rotA = mShape->getSequenceRotation(sequence, thread.keyInfo.keyA, rotFrame).toQuat();
+               slm::quat rotB = mShape->getSequenceRotation(sequence, thread.keyInfo.keyB, rotFrame).toQuat();
+               nodeRotations[nodeIdx] = CompatInterpolate(rotA, rotB, thread.keyInfo.keyPos);
+               rotationSet[nodeIdx] = true;
+            }
+            rotFrame++;
+         }
+
+         for (int32_t nodeIdx = sequence.mattersTranslation.findFirst();
+              nodeIdx >= 0;
+              nodeIdx = sequence.mattersTranslation.findNext(nodeIdx))
+         {
+            if (nodeIdx < firstNode || nodeIdx >= endNode)
+               continue;
+
+            if (!translationSet[nodeIdx])
+            {
+               slm::vec3 transA = mShape->getSequenceTranslation(sequence, thread.keyInfo.keyA, transFrame);
+               slm::vec3 transB = mShape->getSequenceTranslation(sequence, thread.keyInfo.keyB, transFrame);
+               nodeTranslations[nodeIdx] = slm::mix(transA, transB, thread.keyInfo.keyPos);
+               translationSet[nodeIdx] = true;
+            }
+            transFrame++;
+         }
+
+         for (int32_t nodeIdx = sequence.mattersScale.findFirst();
+              nodeIdx >= 0;
+              nodeIdx = sequence.mattersScale.findNext(nodeIdx))
+         {
+            if (nodeIdx < firstNode || nodeIdx >= endNode)
+               continue;
+
+            if (!scaleSet[nodeIdx])
+            {
+               if (sequence.testFlags(Dts3::Sequence::ArbitraryScale))
+               {
+                  Dts3::ArbitraryScale scaleA = mShape->getSequenceArbitraryScale(sequence, thread.keyInfo.keyA, scaleFrame);
+                  Dts3::ArbitraryScale scaleB = mShape->getSequenceArbitraryScale(sequence, thread.keyInfo.keyB, scaleFrame);
+                  nodeScales[nodeIdx] = slm::mix(scaleA.pos, scaleB.pos, thread.keyInfo.keyPos);
+               }
+               else if (sequence.testFlags(Dts3::Sequence::AlignedScale))
+               {
+                  slm::vec3 scaleA = mShape->getSequenceAlignedScale(sequence, thread.keyInfo.keyA, scaleFrame);
+                  slm::vec3 scaleB = mShape->getSequenceAlignedScale(sequence, thread.keyInfo.keyB, scaleFrame);
+                  nodeScales[nodeIdx] = slm::mix(scaleA, scaleB, thread.keyInfo.keyPos);
+               }
+               else if (sequence.testFlags(Dts3::Sequence::UniformScale))
+               {
+                  float scaleA = mShape->getSequenceUniformScale(sequence, thread.keyInfo.keyA, scaleFrame);
+                  float scaleB = mShape->getSequenceUniformScale(sequence, thread.keyInfo.keyB, scaleFrame);
+                  float uniformScale = slm::mix(scaleA, scaleB, thread.keyInfo.keyPos);
+                  nodeScales[nodeIdx] = slm::vec3(uniformScale);
+               }
+               scaleSet[nodeIdx] = true;
+            }
+            scaleFrame++;
+         }
+      });
+
+      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
+      {
+         slm::mat4 localTransform;
+         CompatQuatSetMatrix(nodeRotations[nodeIdx], localTransform);
+         localTransform[3] = slm::vec4(nodeTranslations[nodeIdx], 1.0f);
+
+         if (mApplyScaleTransforms)
+         {
+            localTransform = localTransform * slm::scaling(nodeScales[nodeIdx]);
+         }
+
+         mLocalNodeTransforms[nodeIdx] = localTransform;
+
+         int32_t parentIdx = mShape->mNodes[nodeIdx].parent;
+         if (parentIdx >= 0 && parentIdx < mNodeTransforms.size())
+         {
+            mNodeTransforms[nodeIdx] = mNodeTransforms[parentIdx] * localTransform;
+         }
+         else
+         {
+            mNodeTransforms[nodeIdx] = localTransform;
+         }
+      }
       
       updateTransformTexture();
    }
@@ -1560,9 +1768,19 @@ public:
       initMaterials();
       
       initRender();
+      updateScaleAnimatonState();
+      if (!mShape->mSequences.empty())
+      {
+         uint32_t threadIdx = addThread();
+         setThreadSequence(threadIdx, 0, 0.0f);
+      }
       
       // Setup default pose for nodes
-      animate(0);
+      if (!mShape->mDetailLevels.empty())
+      {
+         mCurrentDetail = 0;
+         animate(mShape->mDetailLevels[mCurrentDetail]);
+      }
    }
    
    void initShapeObjects()
@@ -1787,7 +2005,15 @@ public:
    
    void selectDetail(float dist, int w, int h)
    {
-      mCurrentDetail = 0;
+      mCurrentDetail = -1;
+      for (int32_t i=0; i<mShape->mDetailLevels.size(); i++)
+      {
+         Dts3::DetailLevel& detail = mShape->mDetailLevels[i];
+         if (detail.subshape < 0 || detail.objectDetail < 0)
+            continue;
+         mCurrentDetail = i;
+         break;
+      }
    }
    
    void drawLine(slm::vec3 start, slm::vec3 end, slm::vec4 color, float width)
@@ -1799,13 +2025,17 @@ public:
    
    void render()
    {
-      renderDetail(0);
+      if (mCurrentDetail < 0 || mCurrentDetail >= mShape->mDetailLevels.size())
+         return;
+
+      animate(mShape->mDetailLevels[mCurrentDetail]);
+      renderDetail(mCurrentDetail);
    }
    
    void renderObject(uint32_t objectIndex, uint32_t meshNum)
    {
       Dts3::Object& obj = mShape->mObjects[objectIndex];
-      if (meshNum > obj.numMeshes)
+      if (meshNum >= obj.numMeshes)
          return;
       
       RuntimeObjectInfo& ri = mRuntimeObjectInfos[objectIndex];
@@ -2000,7 +2230,16 @@ public:
    void renderNodes(int32_t nodeIdx, slm::vec3 parentPos, int32_t highlightIdx)
    {
       if (nodeIdx < 0)
+      {
+         for (int32_t i=0; i<mShape->mNodes.size(); i++)
+         {
+            if (mShape->mNodes[i].parent < 0)
+            {
+               renderNodes(i, parentPos, highlightIdx);
+            }
+         }
          return;
+      }
       
       
 #if 0
@@ -2073,15 +2312,35 @@ public:
       return mShape != NULL;
    }
    
-   void updateNextSequence()
+   void rebuildSequenceUI()
    {
-      #if 0
-      mNextSequence.resize(mViewer.mThreads.size());
-      for (int i=0; i<mViewer.mThreads.size(); i++)
+      mSequenceList.clear();
+      mNextSequence.clear();
+
+      if (mShape == NULL)
+         return;
+
+      mSequenceList.reserve(mShape->mSequences.size());
+      for (Dts3::Sequence& seq : mShape->mSequences)
+      {
+         const char* name = mShape->getName(seq.nameIndex);
+         mSequenceList.push_back(name ? name : "<unnamed>");
+      }
+
+      mNextSequence.resize(mViewer.mThreads.size(), -1);
+      for (size_t i=0; i<mViewer.mThreads.size(); i++)
       {
          mNextSequence[i] = mViewer.mThreads[i].sequenceIdx;
       }
-      #endif
+   }
+
+   void updateNextSequence()
+   {
+      mNextSequence.resize(mViewer.mThreads.size());
+      for (size_t i=0; i<mViewer.mThreads.size(); i++)
+      {
+         mNextSequence[i] = mViewer.mThreads[i].sequenceIdx;
+      }
    }
    
    void loadShape(const char *filename, int pathIdx=-1)
@@ -2100,19 +2359,9 @@ public:
          mViewer.clear();
          mViewer.setResourcePath(filename, pathIdx);
          mViewer.loadShape(*mShape);
-         
-         //uint32_t thr = mViewer.addThread();
-         //mViewer.setThreadSequence(thr, 0);
+         rebuildSequenceUI();
          
          mViewPos = slm::vec3(0);//slm::vec3(0, mViewer.mShape->mCenter.z, mViewer.mShape->mRadius);
-         
-         //mSequenceList.resize(mShape->mSequences.size());
-         //updateNextSequence();
-         
-         //for (int i=0; i<mViewer.mShape->mSequences.size(); i++)
-         //{
-         //   mSequenceList[i] = mShape->getName(mShape->mSequences[i].name);
-         //}
       }
    }
 
@@ -2139,12 +2388,12 @@ public:
 
       mViewer.clear();
       mViewer.loadShape(*mShape);
+      rebuildSequenceUI();
       return true;
    }
    
    void update(float dt)
    {
-      #if 0
       mViewer.mModelMatrix = slm::rotation_x(xRot) * slm::rotation_y(yRot);
       slm::mat4 rotMat = slm::rotation_z(slm::radians(mCamRot.z)) * slm::rotation_y(slm::radians(mCamRot.y)) *  slm::rotation_x(slm::radians(mCamRot.x));
       rotMat = inverse(rotMat);
@@ -2157,11 +2406,10 @@ public:
       if (!mManualThreads)
          mViewer.advanceThreads(dt);
       mViewer.selectDetail(mDetailDist, w, h);
-      mViewer.animateNodes();
       mViewer.render();
       if (mRenderNodes)
       {
-         mViewer.renderNodes(mShape->mDetails[mViewer.mCurrentDetail].rootNode, slm::vec3(0,0,0), mHighlightNodeIdx);
+         mViewer.renderNodes(-1, slm::vec3(0,0,0), mHighlightNodeIdx);
       }
       
       // Now render gui
@@ -2176,7 +2424,11 @@ public:
       
       if (ImGui::Button("Add Thread"))
       {
-         mViewer.addThread();
+         uint32_t threadIdx = mViewer.addThread();
+         if (!mShape->mSequences.empty())
+         {
+            mViewer.setThreadSequence(threadIdx, 0, 0.0f);
+         }
          updateNextSequence();
       }
       
@@ -2189,7 +2441,7 @@ public:
          mRemoveThreadId = -1;
       }
       
-      for (ShapeViewer::ShapeThread &thread : mViewer.mThreads)
+      for (Dts3::Thread &thread : mViewer.mThreads)
       {
          int32_t idx = &thread - &mViewer.mThreads[0];
          snprintf(buffer, 1024, "Thread %i", idx);
@@ -2204,25 +2456,42 @@ public:
          else
          {
             snprintf(buffer, 1024, "seq=%s pos=%f",
-                     thread.sequenceIdx == -1 ? "NULL" : mShape->getName(mShape->mSequences[thread.sequenceIdx].name),
+                     thread.sequenceIdx == -1 ? "NULL" : mShape->getName(mShape->mSequences[thread.sequenceIdx].nameIndex),
                      thread.pos);
          }
          
-         ImGui::Text(buffer);
+         ImGui::Text("%s", buffer);
          
          if (vis)
          {
-            snprintf(buffer, 1024, "Enabled##th%i", idx);
-            ImGui::Checkbox(buffer, &mViewer.mThreads[idx].enabled);
+            bool playing = mViewer.mThreads[idx].playing;
+            snprintf(buffer, 1024, "Playing##th%i", idx);
+            if (ImGui::Checkbox(buffer, &playing))
+            {
+               mViewer.mThreads[idx].playing = playing;
+               if (idx < mViewer.mThreadActive.size())
+                  mViewer.mThreadActive[idx] = playing && mViewer.mThreads[idx].sequenceIdx >= 0;
+            }
             ImGui::SameLine();
             snprintf(buffer, 1024, "Remove##th%i", idx);
             if (ImGui::Button(buffer))
                mRemoveThreadId = idx;
             snprintf(buffer, 1024, "Pos##th%i", idx);
-            ImGui::SliderFloat(buffer, &mViewer.mThreads[idx].pos, 0.0f, 1.0f);
+            if (ImGui::SliderFloat(buffer, &mViewer.mThreads[idx].pos, 0.0f, 1.0f) &&
+                mViewer.mThreads[idx].sequenceIdx >= 0 &&
+                mViewer.mThreads[idx].sequenceIdx < mShape->mSequences.size())
+            {
+               mViewer.selectKeyFrames(mViewer.mThreads[idx].pos,
+                                       mShape->mSequences[mViewer.mThreads[idx].sequenceIdx],
+                                       mViewer.mThreads[idx].keyInfo);
+               mViewer.setDirty(ShapeViewer::RuntimeSubShapeInfo::AllDirty);
+            }
             ImGui::NewLine();
-            snprintf(buffer, 1024, "Sequences##th%i", idx);
-            ImGui::ListBox(buffer, &mNextSequence[idx], &mSequenceList[0], mShape->mSequences.size());
+            if (!mSequenceList.empty())
+            {
+               snprintf(buffer, 1024, "Sequences##th%i", idx);
+               ImGui::ListBox(buffer, &mNextSequence[idx], mSequenceList.data(), (int)mSequenceList.size());
+            }
          }
       }
       
@@ -2236,14 +2505,13 @@ public:
       ImGui::End();
       
       // Update state changed by gui
-      for (int i=0; i<mNextSequence.size(); i++)
+      for (size_t i=0; i<mNextSequence.size(); i++)
       {
          if (mNextSequence[i] != mViewer.mThreads[i].sequenceIdx)
          {
-            mViewer.setThreadSequence(i, mNextSequence[i]);
+            mViewer.setThreadSequence(i, mNextSequence[i], mViewer.mThreads[i].pos);
          }
       }
-      #endif
    }
    
    void nodeTree(int32_t nodeIdx)
