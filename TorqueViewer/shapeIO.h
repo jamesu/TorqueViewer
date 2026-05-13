@@ -250,6 +250,147 @@ struct IO
       return true;
    }
 
+   static bool primitiveNeedsTriangulation(const Primitive& prim)
+   {
+      const uint32_t primType = uint32_t(prim.matIndex) & Primitive::TypeMask;
+      return primType == Primitive::Strip || primType == Primitive::Fan;
+   }
+
+   static bool primitiveListNeedsTriangulation(const std::vector<Primitive>& primitives)
+   {
+      for (const Primitive& prim : primitives)
+      {
+         if (primitiveNeedsTriangulation(prim))
+            return true;
+      }
+
+      return false;
+   }
+
+   static bool appendTriangleListIndices(std::vector<uint16_t>& outIndices, const std::vector<uint16_t>& inIndices, const Primitive& prim)
+   {
+      const uint32_t firstElement = prim.firstElement;
+      const uint32_t numElements = prim.numElements;
+
+      if (firstElement + numElements > inIndices.size())
+         return false;
+
+      const uint32_t primType = uint32_t(prim.matIndex) & Primitive::TypeMask;
+      if (primType == Primitive::Strip)
+      {
+         if (numElements < 3)
+            return true;
+
+         for (uint32_t tri = 0; tri + 2 < numElements; ++tri)
+         {
+            const uint16_t i0 = inIndices[firstElement + tri];
+            const uint16_t i1 = inIndices[firstElement + tri + 1];
+            const uint16_t i2 = inIndices[firstElement + tri + 2];
+
+            if ((tri & 1) == 0)
+            {
+               outIndices.push_back(i0);
+               outIndices.push_back(i1);
+               outIndices.push_back(i2);
+            }
+            else
+            {
+               outIndices.push_back(i1);
+               outIndices.push_back(i0);
+               outIndices.push_back(i2);
+            }
+         }
+      }
+      else if (primType == Primitive::Fan)
+      {
+         if (numElements < 3)
+            return true;
+
+         const uint16_t center = inIndices[firstElement];
+         for (uint32_t tri = 1; tri + 1 < numElements; ++tri)
+         {
+            outIndices.push_back(center);
+            outIndices.push_back(inIndices[firstElement + tri]);
+            outIndices.push_back(inIndices[firstElement + tri + 1]);
+         }
+      }
+      else
+      {
+         outIndices.insert(outIndices.end(),
+                           inIndices.begin() + firstElement,
+                           inIndices.begin() + firstElement + numElements);
+      }
+
+      return true;
+   }
+
+   static bool triangulatePrimitiveList(std::vector<Primitive>& primitives, std::vector<uint16_t>& indices)
+   {
+      if (!primitiveListNeedsTriangulation(primitives))
+         return true;
+
+      std::vector<Primitive> newPrimitives;
+      std::vector<uint16_t> newIndices;
+      newPrimitives.reserve(primitives.size());
+
+      size_t indexReserve = 0;
+      for (const Primitive& prim : primitives)
+      {
+         const uint32_t primType = uint32_t(prim.matIndex) & Primitive::TypeMask;
+         if ((primType == Primitive::Strip || primType == Primitive::Fan) && prim.numElements >= 3)
+            indexReserve += size_t(prim.numElements - 2) * 3;
+         else
+            indexReserve += prim.numElements;
+      }
+      newIndices.reserve(indexReserve);
+
+      for (const Primitive& prim : primitives)
+      {
+         const size_t firstElement = newIndices.size();
+         if (firstElement > 0xFFFFu)
+            return false;
+
+         if (!appendTriangleListIndices(newIndices, indices, prim))
+            return false;
+
+         const size_t numElements = newIndices.size() - firstElement;
+         if (numElements > 0xFFFFu)
+            return false;
+
+         Primitive newPrim = prim;
+         newPrim.firstElement = uint16_t(firstElement);
+         newPrim.numElements = uint16_t(numElements);
+         newPrim.matIndex = Primitive::Type(uint32_t(prim.matIndex) & ~Primitive::TypeMask);
+         newPrimitives.push_back(newPrim);
+      }
+
+      primitives.swap(newPrimitives);
+      indices.swap(newIndices);
+      return true;
+   }
+
+   static bool triangulateMeshPrimitives(Mesh& mesh)
+   {
+      if (BasicData* basicData = mesh.getBasicData())
+         return triangulatePrimitiveList(basicData->primitives, basicData->indices);
+
+      if (DecalData* decalData = mesh.getDecalData())
+         return triangulatePrimitiveList(decalData->primitives, decalData->indices);
+
+      return true;
+   }
+
+   static bool triangulateShapePrimitives(Shape* shape)
+   {
+      for (Mesh& mesh : shape->mMeshes)
+      {
+         if (!triangulateMeshPrimitives(mesh))
+            return false;
+      }
+
+      return true;
+   }
+
    static bool readDSQSequences(Shape* shape, MemRStream& stream, uint32_t version, bool readNameIndex = true, bool addNames = true, bool append = true)
    {
       if (!append)
@@ -766,6 +907,9 @@ struct IO
          assert(false);
       }
       
+      if (!triangulateShapePrimitives(shape))
+         return false;
+
       shape->mPreviousMerge.clear();
       for (int i = 0; i < numObjects; ++i)
       {
