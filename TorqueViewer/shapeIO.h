@@ -15,22 +15,406 @@ struct IO
       EXPORTER_VERSION = 2
    };
 
+   struct ImportedAnimationData
+   {
+      std::vector<Quat16> rotations;
+      std::vector<slm::vec3> translations;
+      std::vector<float> uniformScales;
+      std::vector<slm::vec3> alignedScales;
+      std::vector<Quat16> arbitraryScaleRotations;
+      std::vector<slm::vec3> arbitraryScaleFactors;
+      std::vector<slm::vec3> groundTranslations;
+      std::vector<Quat16> groundRotations;
+   };
+
+   struct ImportedSequenceMeta
+   {
+      int originalBaseRot = -1;
+      int originalBaseTrans = -1;
+      int originalBaseScale = -1;
+      int originalFirstGroundFrame = -1;
+   };
+
+   struct TrackRemap
+   {
+      int dstNode = -1;
+      int srcTrack = -1;
+   };
+
    static bool readDsqSequence(Shape* shape, Sequence& seq, MemRStream& stream, uint32_t version, bool readNameIndex = true, bool addName = true)
    {
       return seq.readSerialized(stream, version, readNameIndex, &shape->mNameTable, addName);
    }
 
+   static int32_t findNodeByNameIndex(const Shape* shape, int32_t nameIndex)
+   {
+      if (nameIndex < 0)
+         return -1;
+
+      for (uint32_t nodeIndex = 0; nodeIndex < shape->mNodes.size(); ++nodeIndex)
+      {
+         if (shape->mNodes[nodeIndex].name == nameIndex)
+            return (int32_t)nodeIndex;
+      }
+
+      return -1;
+   }
+
+   static void buildTrackRemap(const IntegerSet& srcSet, IntegerSet& dstSet, std::vector<TrackRemap>& remap, const std::vector<int32_t>& nodeMap)
+   {
+      dstSet.reset();
+      remap.clear();
+
+      int32_t srcTrack = 0;
+      for (int32_t importedNodeIndex = 0; importedNodeIndex < (int32_t)nodeMap.size(); ++importedNodeIndex)
+      {
+         if (!srcSet.test(importedNodeIndex))
+            continue;
+
+         const int32_t dstNode = nodeMap[importedNodeIndex];
+         if (dstNode >= 0 && !dstSet.test(dstNode))
+         {
+            dstSet.set(dstNode, true);
+            remap.push_back({dstNode, srcTrack});
+         }
+         ++srcTrack;
+      }
+
+      std::sort(remap.begin(), remap.end(), compareTrackRemaps);
+   }
+
+   static bool compareTrackRemaps(const TrackRemap& a, const TrackRemap& b)
+   {
+      return a.dstNode < b.dstNode;
+   }
+
+   static void copyVec3Tracks(std::vector<slm::vec3>& dst, int dstBase, const std::vector<slm::vec3>& src, int srcBase, const std::vector<TrackRemap>& remap, int numKeyFrames)
+   {
+      for (int32_t dstTrack = 0; dstTrack < (int32_t)remap.size(); ++dstTrack)
+      {
+         const int32_t srcTrack = remap[dstTrack].srcTrack;
+         for (int32_t frame = 0; frame < numKeyFrames; ++frame)
+         {
+            dst[dstBase + (dstTrack * numKeyFrames) + frame] = src[srcBase + (srcTrack * numKeyFrames) + frame];
+         }
+      }
+   }
+
+   static void copyQuatTracks(std::vector<Quat16>& dst, int dstBase, const std::vector<Quat16>& src, int srcBase, const std::vector<TrackRemap>& remap, int numKeyFrames)
+   {
+      for (int32_t dstTrack = 0; dstTrack < (int32_t)remap.size(); ++dstTrack)
+      {
+         const int32_t srcTrack = remap[dstTrack].srcTrack;
+         for (int32_t frame = 0; frame < numKeyFrames; ++frame)
+         {
+            dst[dstBase + (dstTrack * numKeyFrames) + frame] = src[srcBase + (srcTrack * numKeyFrames) + frame];
+         }
+      }
+   }
+
+   static void copyFloatTracks(std::vector<float>& dst, int dstBase, const std::vector<float>& src, int srcBase, const std::vector<TrackRemap>& remap, int numKeyFrames)
+   {
+      for (int32_t dstTrack = 0; dstTrack < (int32_t)remap.size(); ++dstTrack)
+      {
+         const int32_t srcTrack = remap[dstTrack].srcTrack;
+         for (int32_t frame = 0; frame < numKeyFrames; ++frame)
+         {
+            dst[dstBase + (dstTrack * numKeyFrames) + frame] = src[srcBase + (srcTrack * numKeyFrames) + frame];
+         }
+      }
+   }
+
+   static void clearImportedSequenceData(Shape* shape)
+   {
+      shape->mSequences.clear();
+      shape->mTriggers.clear();
+      shape->mNodeTranslations.clear();
+      shape->mNodeRotations.clear();
+      shape->mNodeUniformScales.clear();
+      shape->mNodeAlignedScales.clear();
+      shape->mNodeArbitraryScaleFactors.clear();
+      shape->mNodeArbitraryScaleRotations.clear();
+      shape->mGroundTranslations.clear();
+      shape->mGroundRotations.clear();
+   }
+
+   static bool readImportedNodeMap(Shape* shape, MemRStream& stream, std::vector<int32_t>& nodeMap)
+   {
+      int32_t importedNodeCount = 0;
+      if (!stream.read(importedNodeCount) || importedNodeCount < 0)
+         return false;
+
+      nodeMap.resize(importedNodeCount);
+      for (int32_t i = 0; i < importedNodeCount; ++i)
+      {
+         const std::size_t startSize = shape->mNameTable.size();
+         const int32_t nameIndex = Sequence::readName(shape->mNameTable, stream, true);
+         nodeMap[i] = findNodeByNameIndex(shape, nameIndex);
+         if (nodeMap[i] < 0 && shape->mNameTable.size() > startSize)
+         {
+            shape->mNameTable.popBack();
+         }
+      }
+
+      return true;
+   }
+
+   static bool readImportedAnimationData(MemRStream& stream, int32_t fileVersion, ImportedAnimationData& imported)
+   {
+      if (fileVersion > 21)
+      {
+         int32_t count = 0;
+
+         if (!stream.read(count) || count < 0)
+            return false;
+         imported.rotations.resize(count);
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!readQuat16(stream, imported.rotations[i]))
+               return false;
+         }
+
+         if (!stream.read(count) || count < 0)
+            return false;
+         imported.translations.resize(count);
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!readPoint3F(stream, imported.translations[i]))
+               return false;
+         }
+
+         if (!stream.read(count) || count < 0)
+            return false;
+         imported.uniformScales.resize(count);
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!stream.read(imported.uniformScales[i]))
+               return false;
+         }
+
+         if (!stream.read(count) || count < 0)
+            return false;
+         imported.alignedScales.resize(count);
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!readPoint3F(stream, imported.alignedScales[i]))
+               return false;
+         }
+
+         if (!stream.read(count) || count < 0)
+            return false;
+         imported.arbitraryScaleRotations.resize(count);
+         imported.arbitraryScaleFactors.resize(count);
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!readQuat16(stream, imported.arbitraryScaleRotations[i]))
+               return false;
+         }
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!readPoint3F(stream, imported.arbitraryScaleFactors[i]))
+               return false;
+         }
+
+         if (!stream.read(count) || count < 0)
+            return false;
+         imported.groundTranslations.resize(count);
+         imported.groundRotations.resize(count);
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!readPoint3F(stream, imported.groundTranslations[i]))
+               return false;
+         }
+         for (int32_t i = 0; i < count; ++i)
+         {
+            if (!readQuat16(stream, imported.groundRotations[i]))
+               return false;
+         }
+      }
+      else
+      {
+         int32_t transformCount = 0;
+         if (!stream.read(transformCount) || transformCount < 0)
+            return false;
+
+         imported.rotations.resize(transformCount);
+         imported.translations.resize(transformCount);
+         for (int32_t i = 0; i < transformCount; ++i)
+         {
+            if (!readQuat16(stream, imported.rotations[i]) ||
+                !readPoint3F(stream, imported.translations[i]))
+               return false;
+         }
+      }
+
+      return true;
+   }
+
    static bool readDSQSequences(Shape* shape, MemRStream& stream, uint32_t version, bool readNameIndex = true, bool addNames = true, bool append = true)
    {
       if (!append)
-         shape->mSequences.clear();
+         clearImportedSequenceData(shape);
 
-      while (stream.mPos < stream.mSize)
+      int32_t fileVersion = 0;
+      if (!stream.read(fileVersion))
+         return false;
+      if (fileVersion < 19 || fileVersion > DefaultVersion)
+         return false;
+
+      std::vector<int32_t> nodeMap;
+      if (!readImportedNodeMap(shape, stream, nodeMap))
+         return false;
+
+      int32_t legacyObjectNameCount = 0;
+      int32_t oldShapeNumObjects = 0;
+      if (!stream.read(legacyObjectNameCount) || !stream.read(oldShapeNumObjects))
+         return false;
+
+      ImportedAnimationData imported;
+      if (!readImportedAnimationData(stream, fileVersion, imported))
+         return false;
+
+      int32_t objectStateCount = 0;
+      if (!stream.read(objectStateCount))
+      {
+         return false;
+      }
+      
+      const int32_t triggerBase = (int32_t)shape->mTriggers.size();
+      const int32_t groundBase = (int32_t)shape->mGroundTranslations.size();
+
+      if (fileVersion > 21)
+      {
+         shape->mGroundTranslations.insert(shape->mGroundTranslations.end(),
+                                           imported.groundTranslations.begin(),
+                                           imported.groundTranslations.end());
+         shape->mGroundRotations.insert(shape->mGroundRotations.end(),
+                                        imported.groundRotations.begin(),
+                                        imported.groundRotations.end());
+      }
+
+      int32_t sequenceCount = 0;
+      if (!stream.read(sequenceCount) || sequenceCount < 0)
+      {
+         return false;
+      }
+      
+      std::vector<ImportedSequenceMeta> importedSequenceMeta;
+      importedSequenceMeta.reserve(sequenceCount);
+
+      for (int32_t sequenceIndex = 0; sequenceIndex < sequenceCount; ++sequenceIndex)
       {
          Sequence seq;
-         if (!readDsqSequence(shape, seq, stream, version, readNameIndex, addNames))
+         if (!readDsqSequence(shape, seq, stream, fileVersion, false, addNames))
+         {
             return false;
+         }
+         
+         ImportedSequenceMeta meta;
+         meta.originalBaseRot = seq.baseRot;
+         meta.originalBaseTrans = seq.baseTrans;
+         meta.originalBaseScale = seq.baseScale;
+         meta.originalFirstGroundFrame = seq.firstGroundFrame;
+
+         std::vector<TrackRemap> rotationRemap;
+         std::vector<TrackRemap> translationRemap;
+         std::vector<TrackRemap> scaleRemap;
+         IntegerSet newMattersRot;
+         IntegerSet newMattersTranslation;
+         IntegerSet newMattersScale;
+
+         buildTrackRemap(seq.mattersRot, newMattersRot, rotationRemap, nodeMap);
+         buildTrackRemap(seq.mattersTranslation, newMattersTranslation, translationRemap, nodeMap);
+         buildTrackRemap(seq.mattersScale, newMattersScale, scaleRemap, nodeMap);
+
+         seq.baseRot = (int32_t)shape->mNodeRotations.size();
+         shape->mNodeRotations.resize(shape->mNodeRotations.size() + (rotationRemap.size() * (size_t)seq.numKeyFrames));
+         copyQuatTracks(shape->mNodeRotations, seq.baseRot, imported.rotations, meta.originalBaseRot, rotationRemap, seq.numKeyFrames);
+
+         seq.baseTrans = (int32_t)shape->mNodeTranslations.size();
+         shape->mNodeTranslations.resize(shape->mNodeTranslations.size() + (translationRemap.size() * (size_t)seq.numKeyFrames));
+         copyVec3Tracks(shape->mNodeTranslations, seq.baseTrans, imported.translations, meta.originalBaseTrans, translationRemap, seq.numKeyFrames);
+
+         seq.baseScale = -1;
+         if (seq.testFlags(Sequence::ArbitraryScale))
+         {
+            seq.baseScale = (int32_t)shape->mNodeArbitraryScaleFactors.size();
+            shape->mNodeArbitraryScaleRotations.resize(shape->mNodeArbitraryScaleRotations.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
+            shape->mNodeArbitraryScaleFactors.resize(shape->mNodeArbitraryScaleFactors.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
+            copyQuatTracks(shape->mNodeArbitraryScaleRotations, seq.baseScale, imported.arbitraryScaleRotations, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
+            copyVec3Tracks(shape->mNodeArbitraryScaleFactors, seq.baseScale, imported.arbitraryScaleFactors, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
+         }
+         else if (seq.testFlags(Sequence::AlignedScale))
+         {
+            seq.baseScale = (int32_t)shape->mNodeAlignedScales.size();
+            shape->mNodeAlignedScales.resize(shape->mNodeAlignedScales.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
+            copyVec3Tracks(shape->mNodeAlignedScales, seq.baseScale, imported.alignedScales, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
+         }
+         else if (seq.testFlags(Sequence::UniformScale))
+         {
+            seq.baseScale = (int32_t)shape->mNodeUniformScales.size();
+            shape->mNodeUniformScales.resize(shape->mNodeUniformScales.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
+            copyFloatTracks(shape->mNodeUniformScales, seq.baseScale, imported.uniformScales, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
+         }
+
+         seq.mattersRot = newMattersRot;
+         seq.mattersTranslation = newMattersTranslation;
+         seq.mattersScale = newMattersScale;
+         seq.firstTrigger += triggerBase;
+
+         if (fileVersion > 21)
+         {
+            seq.firstGroundFrame += groundBase;
+         }
+
+         importedSequenceMeta.push_back(meta);
          shape->mSequences.push_back(seq);
+      }
+
+      if (fileVersion < 22)
+      {
+         const size_t importedSequenceStart = shape->mSequences.size() - importedSequenceMeta.size();
+         for (size_t i = 0; i < importedSequenceMeta.size(); ++i)
+         {
+            Sequence& seq = shape->mSequences[importedSequenceStart + i];
+            const ImportedSequenceMeta& meta = importedSequenceMeta[i];
+
+            const int32_t oldGroundSize = (int32_t)shape->mGroundTranslations.size();
+            if (seq.numGroundFrames > 0)
+            {
+               shape->mGroundTranslations.resize(shape->mGroundTranslations.size() + seq.numGroundFrames);
+               shape->mGroundRotations.resize(shape->mGroundRotations.size() + seq.numGroundFrames);
+               for (int32_t frame = 0; frame < seq.numGroundFrames; ++frame)
+               {
+                  const int32_t sourceIndex = meta.originalFirstGroundFrame + frame;
+                  if (sourceIndex < 0 ||
+                      sourceIndex >= (int32_t)imported.translations.size() ||
+                      sourceIndex >= (int32_t)imported.rotations.size())
+                  {
+                     return false;
+                  }
+                  
+                  shape->mGroundTranslations[oldGroundSize + frame] = imported.translations[sourceIndex];
+                  shape->mGroundRotations[oldGroundSize + frame] = imported.rotations[sourceIndex];
+               }
+            }
+            seq.firstGroundFrame = oldGroundSize;
+         }
+      }
+
+      int32_t triggerCount = 0;
+      if (!stream.read(triggerCount) || triggerCount < 0)
+      {
+         return false;
+      }
+      
+      shape->mTriggers.resize(shape->mTriggers.size() + triggerCount);
+      for (int32_t i = 0; i < triggerCount; ++i)
+      {
+         if (!readTrigger(stream, shape->mTriggers[(size_t)triggerBase + i]))
+         {
+            return false;
+         }
       }
 
       return stream.mPos == stream.mSize;

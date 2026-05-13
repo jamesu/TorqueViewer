@@ -91,6 +91,19 @@ public:
    {
       return addString(str, true);
    }
+
+   inline std::size_t size() const
+   {
+      return mStrings.size();
+   }
+
+   inline void popBack()
+   {
+      if (!mStrings.empty())
+      {
+         mStrings.pop_back();
+      }
+   }
    
 private:
    
