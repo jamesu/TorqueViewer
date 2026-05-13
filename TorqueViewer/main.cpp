@@ -2014,7 +2014,6 @@ public:
    
    void loadShape(const char *filename, int pathIdx=-1)
    {
-      MemRStream rStream(0, NULL);
       mViewer.clear();
       if (mShape)
          delete mShape;
@@ -2042,6 +2041,32 @@ public:
          //   mSequenceList[i] = mShape->getName(mShape->mSequences[i].name);
          //}
       }
+   }
+
+   bool loadDSQ(const char *filename, int pathIdx=-1)
+   {
+      if (mShape == NULL)
+      {
+         fprintf(stderr, "cannot load DSQ '%s' without a loaded shape\n", filename);
+         return false;
+      }
+
+      MemRStream stream(0, NULL);
+      if (!mViewer.mResourceManager->openFile(filename, stream, pathIdx))
+      {
+         fprintf(stderr, "failed to open DSQ '%s'\n", filename);
+         return false;
+      }
+
+      if (!Dts3::IO::readDSQSequences(mShape, stream, Dts3::DefaultVersion, false, true, true))
+      {
+         fprintf(stderr, "failed to import DSQ '%s'\n", filename);
+         return false;
+      }
+
+      mViewer.clear();
+      mViewer.loadShape(*mShape);
+      return true;
    }
    
    void update(float dt)
@@ -2384,6 +2409,14 @@ int MainState::boot()
       if (ext == ".dts")
       {
          shapeController->loadShape(path);
+         currentController = shapeController;
+      }
+      else if (ext == ".dsq")
+      {
+         if (!shapeController->loadDSQ(path))
+         {
+            return 1;
+         }
          currentController = shapeController;
       }
       else if (ext == ".vol" || ext == ".zip")
