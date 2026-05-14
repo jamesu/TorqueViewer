@@ -2411,6 +2411,94 @@ public:
       rebuildSequenceUI();
       return true;
    }
+
+   bool dumpLoadedShapeOBJ(const char *filename)
+   {
+      if (mShape == NULL || filename == NULL)
+      {
+         return false;
+      }
+
+      std::ofstream out(filename);
+      if (!out.is_open())
+      {
+         fprintf(stderr, "failed to open OBJ dump '%s'\n", filename);
+         return false;
+      }
+
+      uint32_t vertexBase = 1;
+      uint32_t texcoordBase = 1;
+      for (uint32_t meshIdx = 0; meshIdx < mShape->mMeshes.size(); meshIdx++)
+      {
+         Dts3::Mesh& mesh = mShape->mMeshes[meshIdx];
+         Dts3::BasicData* basicData = mesh.getBasicData();
+         if (basicData == NULL)
+            continue;
+
+         const uint32_t vertsPerFrame = mesh.mVertsPerFrame ? mesh.mVertsPerFrame : (uint32_t)basicData->verts.size();
+         const uint32_t texVertsPerFrame = mesh.mVertsPerFrame ? std::min<uint32_t>(mesh.mVertsPerFrame, (uint32_t)basicData->tverts.size()) : (uint32_t)basicData->tverts.size();
+         if (vertsPerFrame == 0)
+            continue;
+
+         std::string meshName = "mesh_" + std::to_string(meshIdx);
+         out << "g " << meshName << "\n";
+         out << "o " << meshName << "\n";
+
+         for (uint32_t i = 0; i < vertsPerFrame && i < basicData->verts.size(); i++)
+         {
+            const slm::vec3& v = basicData->verts[i];
+            out << "v " << v.x << " " << v.y << " " << v.z << "\n";
+         }
+
+         for (uint32_t i = 0; i < texVertsPerFrame && i < basicData->tverts.size(); i++)
+         {
+            const slm::vec2& vt = basicData->tverts[i];
+            out << "vt " << vt.x << " " << (1.0f - vt.y) << "\n";
+         }
+
+         for (const Dts3::Primitive& prim : basicData->primitives)
+         {
+            const uint32_t drawMode = prim.matIndex & Dts3::Primitive::TypeMask;
+            if (drawMode != Dts3::Primitive::Triangles)
+               continue;
+
+            for (uint32_t i = 0; i + 2 < prim.numElements; i += 3)
+            {
+               const uint32_t i0 = basicData->indices[prim.firstElement + i + 0];
+               const uint32_t i1 = basicData->indices[prim.firstElement + i + 1];
+               const uint32_t i2 = basicData->indices[prim.firstElement + i + 2];
+
+               if (i0 >= vertsPerFrame || i1 >= vertsPerFrame || i2 >= vertsPerFrame)
+                  continue;
+
+               const uint32_t v0 = vertexBase + i0;
+               const uint32_t v1 = vertexBase + i1;
+               const uint32_t v2 = vertexBase + i2;
+
+               if (i0 < texVertsPerFrame && i1 < texVertsPerFrame && i2 < texVertsPerFrame)
+               {
+                  const uint32_t t0 = texcoordBase + i0;
+                  const uint32_t t1 = texcoordBase + i1;
+                  const uint32_t t2 = texcoordBase + i2;
+                  out << "f "
+                      << v0 << "/" << t0 << " "
+                      << v1 << "/" << t1 << " "
+                      << v2 << "/" << t2 << "\n";
+               }
+               else
+               {
+                  out << "f " << v0 << " " << v1 << " " << v2 << "\n";
+               }
+            }
+         }
+
+         out << "\n";
+         vertexBase += vertsPerFrame;
+         texcoordBase += texVertsPerFrame;
+      }
+
+      return true;
+   }
    
    void update(float dt)
    {
@@ -2756,12 +2844,23 @@ void MainState::shutdown()
 int MainState::boot()
 {
    currentController = shapeController;
+   std::string dumpObjPath;
    
    for (int i=1; i<in_argc; i++)
    {
       const char *path = in_argv[i];
+      if (path && strcmp(path, "--dump-obj") == 0)
+      {
+         if (i + 1 >= in_argc)
+         {
+            fprintf(stderr, "--dump-obj requires an output path\n");
+            return 1;
+         }
+         dumpObjPath = in_argv[++i];
+         continue;
+      }
       if (path && path[0] == '-')
-         break;
+         continue;
       
       fs::path filePath = path;
       std::string  ext = filePath.extension();
@@ -2804,6 +2903,12 @@ int MainState::boot()
    {
       fprintf(stderr, "please specify a starting shape or interior or terrain to load\n");
       return 1;
+   }
+
+   if (!dumpObjPath.empty())
+   {
+      if (!shapeController->dumpLoadedShapeOBJ(dumpObjPath.c_str()))
+         return 1;
    }
    
    running = true;
