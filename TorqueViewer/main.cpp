@@ -2687,7 +2687,6 @@ void ResManager::initStatics()
 int main(int argc, const char * argv[])
 {
    SDL_Window* window = NULL;
-   SDL_Renderer* renderer = NULL;
    
    assert(sizeof(slm::vec2) == 8);
    assert(sizeof(slm::vec3) == 12);
@@ -2701,7 +2700,8 @@ int main(int argc, const char * argv[])
       return (1);
    }
    
-   if (!SDL_CreateWindowAndRenderer("DTS Viewer", 1024, 700, SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE, &window, &renderer)) {
+   window = SDL_CreateWindow("DTS Viewer", 1024, 700, SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE);
+   if (window == NULL) {
       printf( "Window could not be created! SDL_Error: %s\n", SDL_GetError() );
       return (1);
    }
@@ -2709,7 +2709,7 @@ int main(int argc, const char * argv[])
    // Init basic main
    gMainState.init(window, argc, argv);
    
-   int setupCode = GFXSetup(window, renderer);
+   int setupCode = GFXSetup(window, NULL);
    
    if (setupCode < 0)
    {
@@ -2719,7 +2719,7 @@ int main(int argc, const char * argv[])
    // Non-Emscripten setup
    while (setupCode != 0)
    {
-      setupCode = GFXSetup(window, renderer);
+      setupCode = GFXSetup(window, NULL);
    }
    
    int ret = gMainState.boot();
@@ -2936,6 +2936,12 @@ int MainState::loop()
                case SDLK_RIGHT: deltaRot.y = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
                case SDLK_UP:  deltaRot.x = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
                case SDLK_DOWN: deltaRot.x = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
+               case SDLK_F12:
+                  if (event.type == SDL_EVENT_KEY_DOWN)
+                  {
+                     GFXRequestDebuggerCapture();
+                  }
+                  break;
             }
          }
             break;

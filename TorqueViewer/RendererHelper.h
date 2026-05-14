@@ -26,6 +26,7 @@ extern void GFXResetSwapChain();
 extern bool GFXBeginFrame();
 extern void GFXEndFrame();
 extern void GFXHandleResize();
+extern void GFXRequestDebuggerCapture();
 
 //
 extern int32_t GFXLoadCustomTexture(CustomTextureFormat fmt, uint32_t width, uint32_t height, void* data);

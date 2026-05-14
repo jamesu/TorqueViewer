@@ -49,6 +49,9 @@ extern "C"
 {
 #if defined(__APPLE__) || defined(WGPU_NATIVE)
 #include "webgpu.h"
+#if defined(WGPU_NATIVE)
+#include "wgpu.h"
+#endif
 #else
 #include <webgpu/webgpu.h>
 #endif
@@ -139,6 +142,8 @@ struct TerrainProgramInfo : public BaseProgramInfo
 
 struct SDLState
 {
+   static constexpr uint32_t MaxFramesInFlight = 3;
+
    enum GpuInitState
    {
       INIT_NONE,
@@ -162,6 +167,7 @@ struct SDLState
    {
       WGPUBuffer buffer;
       uint32_t flags;
+      uint32_t frameSlot;
       size_t head;
       size_t size;
    };
@@ -255,6 +261,9 @@ struct SDLState
    WGPUCommandEncoder commandEncoder;
    BaseProgramInfo* currentProgram;
    WGPURenderPipeline currentPipeline;
+   uint32_t frameSlot;
+   bool requestDebuggerCapture;
+   bool debuggerCaptureActive;
    
    // Samplers
    
@@ -288,7 +297,7 @@ struct SDLState
    
    bool loadShaderModule(const char* name, const char* code);
    BufferRef allocBuffer(size_t size, uint32_t flags, uint16_t alignment);
-   void resetBufferAllocs();
+   void resetBufferAllocs(uint32_t frameSlot);
    
    void beginRenderPass(bool secondary);
    void endRenderPass();
@@ -981,6 +990,9 @@ SDLState::SDLState()
    renderEncoder = NULL;
    commandEncoder = NULL;
    currentPipeline = NULL;
+   frameSlot = SDLState::MaxFramesInFlight - 1;
+   requestDebuggerCapture = false;
+   debuggerCaptureActive = false;
    
    gpuInitState = (GpuInitState)0;
 }
@@ -1016,6 +1028,9 @@ void GFXPollEvents()
 void GFXTeardown();
 
 extern void GFXSetCocoaWindow(SDL_Window* window, WGPUSurfaceSourceMetalLayer* s);
+#if defined(__APPLE__)
+extern void GFXClearCocoaWindow();
+#endif
 
 bool SDLState::initWGPUSurface()
 {
@@ -1385,6 +1400,7 @@ WGPURenderPassDescriptor SDLState::createRenderPass(bool secondary)
    depthAttachment.stencilClearValue = 0;
    
    WGPURenderPassDescriptor renderPassDesc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+   renderPassDesc.label = WGPUString(secondary ? "OverlayRenderPass" : "MainRenderPass");
    renderPassDesc.colorAttachmentCount = 1;
    renderPassDesc.colorAttachments = &colorAttachment;
    renderPassDesc.depthStencilAttachment = &depthAttachment; // Attach the depth texture
@@ -1420,7 +1436,7 @@ SDLState::BufferRef SDLState::allocBuffer(size_t size, uint32_t flags, uint16_t 
    
    for (SDLState::BufferAlloc& alloc : buffers)
    {
-      if (alloc.flags != flags)
+      if (alloc.flags != flags || alloc.frameSlot != frameSlot)
          continue;
       
       alloc.head = AlignSize(alloc.head, alignment);
@@ -1445,6 +1461,7 @@ SDLState::BufferRef SDLState::allocBuffer(size_t size, uint32_t flags, uint16_t 
    
    BufferAlloc newAlloc = {};
    newAlloc.flags = flags;
+   newAlloc.frameSlot = frameSlot;
    newAlloc.size = bufferDesc.size;
    newAlloc.buffer = wgpuDeviceCreateBuffer(smState.gpuDevice, &bufferDesc);
    buffers.push_back(newAlloc);
@@ -1452,11 +1469,12 @@ SDLState::BufferRef SDLState::allocBuffer(size_t size, uint32_t flags, uint16_t 
    return allocBuffer(size, flags, alignment);
 }
 
-void SDLState::resetBufferAllocs()
+void SDLState::resetBufferAllocs(uint32_t targetFrameSlot)
 {
    for (SDLState::BufferAlloc& alloc : buffers)
    {
-      alloc.head = 0;
+      if (alloc.frameSlot == targetFrameSlot)
+         alloc.head = 0;
    }
 }
 
@@ -1482,7 +1500,9 @@ void SDLState::endRenderPass()
    wgpuRenderPassEncoderEnd(renderEncoder);
    
    // Finish the command encoder to submit the work
-   WGPUCommandBuffer commandBuffer = wgpuCommandEncoderFinish(commandEncoder, NULL);
+   WGPUCommandBufferDescriptor commandBufferDesc = {};
+   commandBufferDesc.label = WGPUString("FrameCommandBuffer");
+   WGPUCommandBuffer commandBuffer = wgpuCommandEncoderFinish(commandEncoder, &commandBufferDesc);
    
    // NOTE: these both need to be released here otherwise wgpuQueueSubmit complains
    
@@ -1512,6 +1532,9 @@ void GFXTeardown()
    ImGui_ImplWGPU_Shutdown();
    ImGui_ImplSDL3_Shutdown();
    smState.resetWGPUState();
+#if defined(__APPLE__)
+   GFXClearCocoaWindow();
+#endif
 }
 
 void GFXTestRender(slm::vec3 pos)
@@ -1519,10 +1542,20 @@ void GFXTestRender(slm::vec3 pos)
    
 }
 
+void GFXRequestDebuggerCapture()
+{
+#if defined(WGPU_NATIVE)
+   smState.requestDebuggerCapture = true;
+#endif
+}
+
 bool GFXBeginFrame()
 {
    if (smState.commandEncoder)
       return false;
+
+   smState.frameSlot = (smState.frameSlot + 1) % SDLState::MaxFramesInFlight;
+   smState.resetBufferAllocs(smState.frameSlot);
    
    for (SDLState::FrameModel& model : smState.models)
    {
@@ -1559,6 +1592,22 @@ bool GFXBeginFrame()
       smState.gpuSurfaceTextureView = wgpuTextureCreateView(smState.gpuSurfaceTexture.texture, &viewDescriptor);
    }
 
+#if defined(WGPU_NATIVE)
+   if (smState.requestDebuggerCapture && !smState.debuggerCaptureActive)
+   {
+      if (wgpuDeviceStartGraphicsDebuggerCapture(smState.gpuDevice))
+      {
+         smState.debuggerCaptureActive = true;
+         fprintf(stderr, "started wgpu graphics debugger capture\n");
+      }
+      else
+      {
+         fprintf(stderr, "failed to start wgpu graphics debugger capture\n");
+      }
+      smState.requestDebuggerCapture = false;
+   }
+#endif
+
    smState.beginRenderPass(false);
    
    ImGui_ImplWGPU_NewFrame();
@@ -1575,17 +1624,28 @@ void GFXEndFrame()
    
    smState.endRenderPass();
    
-   wgpuSurfacePresent(smState.gpuSurface);
+   WGPUStatus presentStatus = wgpuSurfacePresent(smState.gpuSurface);
+   if (presentStatus != WGPUStatus_Success)
+   {
+      fprintf(stderr, "wgpuSurfacePresent failed: %d\n", (int)presentStatus);
+   }
    
    if (smState.gpuSurfaceTexture.texture)
    {
-      wgpuTextureRelease(smState.gpuSurfaceTexture.texture);
       wgpuTextureViewRelease(smState.gpuSurfaceTextureView);
+      wgpuTextureRelease(smState.gpuSurfaceTexture.texture);
       smState.gpuSurfaceTextureView = NULL;
       smState.gpuSurfaceTexture = {};
    }
 
-   smState.resetBufferAllocs();
+#if defined(WGPU_NATIVE)
+   if (smState.debuggerCaptureActive)
+   {
+      wgpuDeviceStopGraphicsDebuggerCapture(smState.gpuDevice);
+      smState.debuggerCaptureActive = false;
+      fprintf(stderr, "stopped wgpu graphics debugger capture\n");
+   }
+#endif
 }
 
 void GFXHandleResize()
@@ -2097,6 +2157,9 @@ void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &pro
    smState.modelMatrix = model;
    smState.projectionMatrix = proj;
    smState.viewMatrix = view;
+
+   if (smState.currentProgram == NULL)
+      return;
    
    CommonUniformStruct& uniforms = smState.currentProgram->uniforms;
    uniforms.projMat = smState.projectionMatrix;
@@ -2117,6 +2180,9 @@ void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient)
 {
    smState.lightPos = pos;
    smState.lightColor = ambient;
+
+   if (smState.currentProgram == NULL)
+      return;
    
    if (smState.currentPipeline != smState.lineProgram.pipeline)
    {
