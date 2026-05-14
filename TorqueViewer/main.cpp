@@ -2742,32 +2742,25 @@ public:
          }
          return;
       }
-      
-      
-#if 0
-      slm::mat4 firstXfm = slm::inverse(mNodeTransforms[0]);
-      slm::mat4 baseModel = mModelMatrix;
-      slm::mat4 y_up = slm::rotation_x(slm::radians(-90.0f));
-      
-      slm::mat4 slmMat = mNodeTransforms[nodeIdx];
-      
-      slmMat[3] = slm::vec4(0,0,0,1);
-      //slmMat = slm::transpose(slmMat);
-      slmMat[3] = mNodeTransforms[nodeIdx][3];
-      
-      assert(slmMat[3].w == 1);
-      
-      slm::vec4 pos = baseModel * y_up * firstXfm * slmMat * slm::vec4(0,0,0,1);
-      
-      drawLine(pos.xyz(), parentPos, nodeIdx == highlightIdx ? slm::vec4(0,1,0,1) : slm::vec4(1,0,0,1), 1);
-      
-      // Recurse
-      Shape::NodeChildInfo info = mShape->mNodeChildren[nodeIdx+1];
-      for (int32_t i=0; i<info.numChildren; i++)
+
+      if (nodeIdx >= (int32_t)mNodeTransforms.size())
+         return;
+
+      const Dts3::Node& node = mShape->mNodes[nodeIdx];
+      const slm::vec4 worldPos4 = mModelMatrix * slm::vec4(mNodeTransforms[nodeIdx][3].xyz(), 1.0f);
+      const slm::vec3 worldPos = worldPos4.xyz();
+
+      if (node.parent >= 0)
       {
-         renderNodes(mShape->mNodeChildIds[info.firstChild+i], pos.xyz(), highlightIdx);
+         const slm::vec4 color = nodeIdx == highlightIdx ? slm::vec4(0, 1, 0, 1) : slm::vec4(1, 0, 0, 1);
+         GFXBeginLinePipelineState();
+         GFXDrawLine(parentPos, worldPos, color, 1.0f);
       }
-#endif
+
+      for (int32_t childIdx = node.firstChild; childIdx >= 0; childIdx = mShape->mNodes[childIdx].nextSibling)
+      {
+         renderNodes(childIdx, worldPos, highlightIdx);
+      }
    }
 };
 

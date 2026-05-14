@@ -2,7 +2,7 @@ struct CommonUniforms {
     projMat: mat4x4<f32>,
     viewMat: mat4x4<f32>,
     modelMat: mat4x4<f32>,
-    params1: vec4<f32>, // viewportScale.xy, lineWidth
+    params1: vec4<f32>, // ndcPixelScale.xy, lineWidth
     params2: vec4<f32>, // alphaTestF
     lightPos: vec4<f32>,
     lightColor: vec4<f32>,
@@ -28,43 +28,34 @@ struct FragmentOutput {
 
 @vertex
 fn mainVert(input: VertexInput) -> VertexOutput {
-    var mvpMat: mat4x4<f32> = commonUniforms.projMat * commonUniforms.viewMat;// * commonUniforms.modelMat;
-    var mvMat: mat4x4<f32> = commonUniforms.viewMat;// * commonUniforms.modelMat;
-
-    var projStartPos: vec4<f32> = mvpMat * vec4<f32>(input.aPosition, 1.0);
-    var projEndPos: vec4<f32> = mvpMat * vec4<f32>(input.aNext, 1.0);
-
-    projStartPos.x /= projStartPos.w;
-    projStartPos.y /= projStartPos.w;
-    projStartPos.z /= projStartPos.w;
-    projEndPos.x /= projEndPos.w;
-    projEndPos.y /= projEndPos.w;
-    projEndPos.z /= projEndPos.w;
-
-    let dp = projEndPos - projStartPos;
-    var delta = normalize(dp.xy);
-    delta = vec2<f32>(-delta.y, delta.x);
-    var realDelta = vec2<f32>(0.0, 0.0);
-
-    realDelta += delta * input.aNormal.x;
-    realDelta = realDelta * commonUniforms.params1.z;
-
     var output: VertexOutput;
-    var clipSpace = mvpMat * vec4<f32>(input.aPosition, 1.0);
-    clipSpace.x /= clipSpace.w;
-    clipSpace.y /= clipSpace.w;
-    clipSpace.z /= clipSpace.w;
-    clipSpace += vec4<f32>(realDelta.xy * commonUniforms.params1.xy, 0.0, 0.0);
-    clipSpace.z = 1.0;
+    let mvpMat: mat4x4<f32> = commonUniforms.projMat * commonUniforms.viewMat;
+    let startClip = mvpMat * vec4<f32>(input.aPosition, 1.0);
+    let endClip = mvpMat * vec4<f32>(input.aNext, 1.0);
 
-    if (projStartPos.w < 0.01) {
-        clipSpace.w = -1.0;
-    } else {
-        clipSpace.w = 1.0;
+    if (startClip.w <= 0.0 || endClip.w <= 0.0) {
+        output.position = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        output.vColor0 = input.aColor0;
+        return output;
     }
+
+    let startNdc = startClip.xy / startClip.w;
+    let endNdc = endClip.xy / endClip.w;
+    let lineDir = endNdc - startNdc;
+    let dirLen = length(lineDir);
+    var perp = vec2<f32>(0.0, 1.0);
+    if (dirLen > 0.000001) {
+        let dir = lineDir / dirLen;
+        perp = vec2<f32>(-dir.y, dir.x);
+    }
+
+    let offsetNdc = perp * input.aNormal.x * commonUniforms.params1.z * commonUniforms.params1.xy;
+    var clipSpace = startClip;
+    clipSpace.x = clipSpace.x + offsetNdc.x * startClip.w;
+    clipSpace.y = clipSpace.y + offsetNdc.y * startClip.w;
+
     output.position = clipSpace;
     output.vColor0 = input.aColor0;
-
     return output;
 }
 

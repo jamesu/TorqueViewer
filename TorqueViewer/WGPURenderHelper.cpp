@@ -2551,7 +2551,7 @@ void GFXDrawLine(slm::vec3 start, slm::vec3 end, slm::vec4 color, float width)
    verts[5].normal = slm::vec3(1,0,0); // b
    verts[5].color = color;
    
-   smState.lineProgram.uniforms.params1 = slm::vec4(1.0f / smState.viewportSize.x, 1.0f / smState.viewportSize.y, width, 0.0f);
+   smState.lineProgram.uniforms.params1 = slm::vec4(2.0f / smState.viewportSize.x, 2.0f / smState.viewportSize.y, width, 0.0f);
    
    SDLState::BufferRef uniformData = smState.allocCommonUniformData(sizeof(CommonUniformStruct));
    wgpuQueueWriteBuffer(smState.gpuQueue, uniformData.buffer, uniformData.offset, &smState.lineProgram.uniforms, sizeof(CommonUniformStruct));
