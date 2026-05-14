@@ -1446,7 +1446,7 @@ public:
    int32_t getNodeMatterIndex(const IntegerSet& matterSet, int32_t nodeIdx) const
    {
       int32_t matterIndex = 0;
-      for (int32_t it = (int32_t)matterSet.findFirst(); it >= 0; it = (int32_t)matterSet.findNext(it + 1))
+      for (int32_t it = (int32_t)matterSet.findFirst(); it >= 0; it = (int32_t)matterSet.findNext(it))
       {
          if (it == nodeIdx)
             return matterIndex;
@@ -1542,7 +1542,7 @@ public:
       int32_t rotFrame = 0;
       for (int32_t nodeIdx = (int32_t)sequence.mattersRot.findFirst();
            nodeIdx >= 0;
-           nodeIdx = (int32_t)sequence.mattersRot.findNext(nodeIdx + 1))
+           nodeIdx = (int32_t)sequence.mattersRot.findNext(nodeIdx))
       {
          if (nodeIdx < firstNode || nodeIdx >= endNode)
          {
@@ -1564,7 +1564,7 @@ public:
       int32_t transFrame = 0;
       for (int32_t nodeIdx = (int32_t)sequence.mattersTranslation.findFirst();
            nodeIdx >= 0;
-           nodeIdx = (int32_t)sequence.mattersTranslation.findNext(nodeIdx + 1))
+           nodeIdx = (int32_t)sequence.mattersTranslation.findNext(nodeIdx))
       {
          if (nodeIdx < firstNode || nodeIdx >= endNode)
          {
@@ -1586,7 +1586,7 @@ public:
       int32_t scaleFrame = 0;
       for (int32_t nodeIdx = (int32_t)sequence.mattersScale.findFirst();
            nodeIdx >= 0;
-           nodeIdx = (int32_t)sequence.mattersScale.findNext(nodeIdx + 1))
+           nodeIdx = (int32_t)sequence.mattersScale.findNext(nodeIdx))
       {
          if (nodeIdx < firstNode || nodeIdx >= endNode)
          {
@@ -2249,7 +2249,7 @@ public:
          // Copy verts
          Dts3::EmitModelVertices(bd, &packed.verts[vertCount]);
          Dts3::EmitModelTexVertices(bd, &packed.texVerts[vertCount]);
-         memcpy(&packed.indices[indexCount], &bd->indices[0], sizeof(uint16_t) * bd->indices.size());
+         memcpy(&packed.indices[indexCount], bd->indices.data(), sizeof(uint16_t) * bd->indices.size());
          
          // Count & offsets
          rm->mVertOffset = vertCount;

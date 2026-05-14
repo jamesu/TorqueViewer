@@ -834,18 +834,27 @@ public:
 
     std::ptrdiff_t findNext(std::ptrdiff_t last) const
     {
-      std::size_t startWord = last < 0 ? 0 : (last / WordBits);
-      std::size_t wordShift = last < 0 ? 0 : last % WordBits;
+      if (last < 0)
+         return findFirst();
+
+      std::size_t startWord = (std::size_t)last / WordBits;
+      std::size_t bitIndex = ((std::size_t)last % WordBits) + 1;
+
+      if (bitIndex >= WordBits)
+      {
+         ++startWord;
+         bitIndex = 0;
+      }
 
       for (std::size_t i = startWord; i < TotalWords; i++)
       {
          WordType val = mWords[i];
-         val >>= wordShift;
+         val >>= bitIndex;
          if (val != 0)
          {
-            return (std::ptrdiff_t)((i * WordBits) + wordShift + std::countr_zero(val)); 
+            return (std::ptrdiff_t)((i * WordBits) + bitIndex + std::countr_zero(val));
          }
-         wordShift = 0;
+         bitIndex = 0;
       }
       return -1;
     }
