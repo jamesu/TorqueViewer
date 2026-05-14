@@ -2051,8 +2051,9 @@ public:
       // Setup default pose for nodes
       if (!mShape->mDetailLevels.empty())
       {
-         mCurrentDetail = 0;
-         animate(mShape->mDetailLevels[mCurrentDetail]);
+         mCurrentDetail = selectNearestRenderableDetail(0);
+         if (mCurrentDetail >= 0)
+            animate(mShape->mDetailLevels[mCurrentDetail]);
       }
    }
    
@@ -2418,18 +2419,47 @@ public:
    void determineNodeVisibility()
    {
    }
+
+   bool isRenderableDetail(const Dts3::DetailLevel& detail) const
+   {
+      return detail.subshape >= 0 &&
+             detail.subshape < mShape->mSubshapes.size() &&
+             detail.objectDetail >= 0;
+   }
+
+   int32_t selectNearestRenderableDetail(int32_t requestedDetail) const
+   {
+      if (!mShape || mShape->mDetailLevels.empty())
+         return -1;
+
+      requestedDetail = std::clamp<int32_t>(requestedDetail, 0, (int32_t)mShape->mDetailLevels.size() - 1);
+      if (isRenderableDetail(mShape->mDetailLevels[requestedDetail]))
+         return requestedDetail;
+
+      for (int32_t radius = 1; radius < mShape->mDetailLevels.size(); radius++)
+      {
+         const int32_t lower = requestedDetail - radius;
+         if (lower >= 0 && isRenderableDetail(mShape->mDetailLevels[lower]))
+            return lower;
+
+         const int32_t upper = requestedDetail + radius;
+         if (upper < mShape->mDetailLevels.size() && isRenderableDetail(mShape->mDetailLevels[upper]))
+            return upper;
+      }
+
+      return -1;
+   }
    
    void selectDetail(float dist, int w, int h)
    {
-      mCurrentDetail = -1;
-      for (int32_t i=0; i<mShape->mDetailLevels.size(); i++)
+      if (!mShape)
       {
-         Dts3::DetailLevel& detail = mShape->mDetailLevels[i];
-         if (detail.subshape < 0 || detail.objectDetail < 0)
-            continue;
-         mCurrentDetail = i;
-         break;
+         mCurrentDetail = -1;
+         return;
       }
+
+      const int32_t requestedDetail = (int32_t)std::lround(dist);
+      mCurrentDetail = selectNearestRenderableDetail(requestedDetail);
    }
    
    void drawLine(slm::vec3 start, slm::vec3 end, slm::vec4 color, float width)
@@ -2451,8 +2481,9 @@ public:
    void renderObject(uint32_t objectIndex, uint32_t meshNum)
    {
       Dts3::Object& obj = mShape->mObjects[objectIndex];
-      if (meshNum >= obj.numMeshes)
+      if (obj.numMeshes <= 0)
          return;
+      meshNum = std::min<uint32_t>(meshNum, (uint32_t)obj.numMeshes - 1);
       
       RuntimeObjectInfo& ri = mRuntimeObjectInfos[objectIndex];
       if (ri.mLastVis <= 0.0f || !ri.mDraw)
@@ -2698,13 +2729,7 @@ public:
    void renderDetail(uint32_t detailLevel)
    {
       Dts3::DetailLevel& level = mShape->mDetailLevels[detailLevel];
-      if (level.subshape < 0)
-      {
-         // render billboard
-         return;
-      }
-      
-      if (level.objectDetail < 0)
+      if (!isRenderableDetail(level))
          return;
       
       // Setup IFL
@@ -2854,6 +2879,7 @@ public:
          mViewer.clear();
          mViewer.setResourcePath(filename, pathIdx);
          mViewer.loadShape(*mShape);
+         mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
          rebuildSequenceUI();
          
          const float viewDist = std::max(mViewer.mShape->mRadius * 2.0f, 1.0f);
@@ -2885,6 +2911,7 @@ public:
 
       mViewer.clear();
       mViewer.loadShape(*mShape);
+      mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
       rebuildSequenceUI();
       return true;
    }
@@ -3090,7 +3117,12 @@ public:
       ImGui::Begin("View");
       ImGui::SliderAngle("X Rotation", &xRot);
       ImGui::SliderAngle("Y Rotation", &yRot);
-      ImGui::SliderFloat("Detail Distance", &mDetailDist, 0, 1000.0f);
+      int32_t detailSelection = (int32_t)std::lround(mDetailDist);
+      int32_t maxDetailSelection = mShape ? std::max<int32_t>((int32_t)mShape->mDetailLevels.size() - 1, 0) : 0;
+      if (ImGui::SliderInt("Detail Level", &detailSelection, 0, maxDetailSelection))
+      {
+         mDetailDist = (float)detailSelection;
+      }
       ImGui::Checkbox("Render Nodes", &mRenderNodes);
       ImGui::End();
       
