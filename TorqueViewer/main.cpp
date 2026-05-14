@@ -102,43 +102,14 @@ slm::quat CompatInterpolate( slm::quat const & q1,
 
 void CompatQuatSetMatrix(const slm::quat rot, slm::mat4 &outMat)
 {
-   if( rot.x*rot.x + rot.y*rot.y + rot.z*rot.z < 10E-20f)
+   if( rot.x*rot.x + rot.y*rot.y + rot.z*rot.z + rot.w*rot.w < 10E-20f)
    {
       outMat = slm::mat4(1);
       return;
    }
    
-   float xs = rot.x * 2.0f;
-   float ys = rot.y * 2.0f;
-   float zs = rot.z * 2.0f;
-   float wx = rot.w * xs;
-   float wy = rot.w * ys;
-   float wz = rot.w * zs;
-   float xx = rot.x * xs;
-   float xy = rot.x * ys;
-   float xz = rot.x * zs;
-   float yy = rot.y * ys;
-   float yz = rot.y * zs;
-   float zz = rot.z * zs;
-   
-   // r,c
-   outMat[0] = slm::vec4(1.0f - (yy + zz),
-                         xy - wz,
-                         xz + wy,
-                         0.0f);
-   
-   outMat[1] = slm::vec4(xy + wz,
-                         1.0f - (xx + zz),
-                         yz - wx,
-                         0.0f);
-   
-   outMat[2] = slm::vec4(xz - wy,
-                         yz + wx,
-                         1.0f - (xx + yy),
-                         0.0f);
-   
-   //outMat = slm::transpose(outMat);
-   outMat[3] = slm::vec4(0.0f,0.0f,0.0f,1.0f);
+   // NOTE: torques quaternions rotate the other way around from the slm convention
+   outMat = slm::mat4(slm::conjugate(rot));
 }
 
 
@@ -560,6 +531,7 @@ public:
    
    std::vector<slm::mat4> mLocalNodeTransforms; // Current transform list (minus parent)
    std::vector<slm::mat4> mNodeTransforms; // Current transform list (including parent)
+   std::vector<slm::mat4> mDefaultNodeTransforms; // Default/bind absolute node transforms
    
    // Working node animation values
    std::vector<slm::quat> mActiveRotations; // non-gl xfms
@@ -732,6 +704,7 @@ public:
       mRuntimeNodeCallbacks.clear();
       mNodeTransforms.clear();
       mLocalNodeTransforms.clear();
+      mDefaultNodeTransforms.clear();
       mActiveRotations.clear();
       mActiveTranslations.clear();
       mActiveUniformScales.clear();
@@ -746,37 +719,43 @@ public:
       clearRender();
    }
    
-   size_t getMaxSkinnedTransforms()
+   size_t getSharedTransformCount() const
    {
-      size_t minMeshTransforms = 1 + mShape->mNodes.size();
-      
-      // We can have the same node distributed across multiple meshes,
-      // so check the mesh counts!
-      for (Dts3::SubShape subShape : mShape->mSubshapes)
+      // Layout:
+      //   [base + 0]      = identity transform
+      //   [base + 1 + ni] = evaluated absolute transform for shape node ni
+      return 1 + mShape->mNodes.size();
+   }
+
+   void buildDefaultNodeTransforms()
+   {
+      const size_t nodeCount = mShape ? mShape->mNodes.size() : 0;
+      mDefaultNodeTransforms.resize(nodeCount, slm::mat4(1.0f));
+      std::vector<slm::mat4> localNodeTransforms(nodeCount, slm::mat4(1.0f));
+
+      for (size_t nodeIdx = 0; nodeIdx < nodeCount; nodeIdx++)
       {
-         size_t subShapeTransforms = 0;
-         
-         // Consider all objects in the subshape
-         for (uint32_t i=0; i<subShape.numObjects; i++)
-         {
-            Dts3::Object& obj = mShape->mObjects[subShape.firstObject + i];
-            
-            // Check all the meshes in this object
-            for (uint32_t mi=0; mi<obj.numMeshes; mi++)
-            {
-               Dts3::Mesh& m = mShape->mMeshes[obj.firstMesh + mi];
-               if (m.mType == Dts3::Mesh::T_Skin)
-               {
-                  Dts3::SkinData* skinData = m.getSkinData();
-                  subShapeTransforms += skinData->nodeTransforms.size();
-               }
-            }
-         }
-         
-         minMeshTransforms = std::max<size_t>(minMeshTransforms, subShapeTransforms);
+         slm::quat nodeRotation(0, 0, 0, 1);
+         slm::vec3 nodeTranslation(0.0f);
+         if (nodeIdx < mShape->mDefaultRotations.size())
+            nodeRotation = mShape->mDefaultRotations[nodeIdx].toQuat();
+         if (nodeIdx < mShape->mDefaultTranslations.size())
+            nodeTranslation = mShape->mDefaultTranslations[nodeIdx];
+
+         slm::mat4 localTransform;
+         CompatQuatSetMatrix(nodeRotation, localTransform);
+         localTransform[3] = slm::vec4(nodeTranslation, 1.0f);
+         localNodeTransforms[nodeIdx] = localTransform;
       }
-      
-      return minMeshTransforms;
+
+      for (size_t nodeIdx = 0; nodeIdx < nodeCount; nodeIdx++)
+      {
+         const int32_t parentIdx = mShape->mNodes[nodeIdx].parent;
+         if (parentIdx >= 0 && parentIdx < mDefaultNodeTransforms.size())
+            mDefaultNodeTransforms[nodeIdx] = mDefaultNodeTransforms[parentIdx] * localNodeTransforms[nodeIdx];
+         else
+            mDefaultNodeTransforms[nodeIdx] = localNodeTransforms[nodeIdx];
+      }
    }
    
    void initRender()
@@ -795,6 +774,7 @@ public:
       mRuntimeSubShapeInfos.resize(mShape->mSubshapes.size());
       mLocalNodeTransforms.resize(mShape->mNodes.size(), slm::mat4(1.0f));
       mNodeTransforms.resize(mShape->mNodes.size(), slm::mat4(1.0f));
+      mDefaultNodeTransforms.resize(mShape->mNodes.size(), slm::mat4(1.0f));
       mActiveRotations.resize(mShape->mNodes.size());
       mActiveTranslations.resize(mShape->mNodes.size());
       mActiveUniformScales.resize(mShape->mNodes.size(), 1.0f);
@@ -814,16 +794,14 @@ public:
          info.mFrame = 0;
          info.mDuration = ifl.time * (float)ifl.numFrames;
       }
+
+      buildDefaultNodeTransforms();
       
       // Load base skin transforms texture
       nodeMeshTransformsTex.reset();
       
-      size_t maxTransforms = getMaxSkinnedTransforms();
-      if (maxTransforms > 0)
-      {
-         mBaseTextureTransform = nodeMeshTransformsTex.allocTransforms(maxTransforms);
-         nodeMeshTransformsTex.ensureValid(maxTransforms, NULL);
-      }
+      const uint32_t sharedTransformCount = (uint32_t)getSharedTransformCount();
+      mBaseTextureTransform = nodeMeshTransformsTex.allocTransforms(sharedTransformCount);
 
       for (size_t i=0; i<mRuntimeMeshInfos.size(); i++)
       {
@@ -834,7 +812,7 @@ public:
       for (Dts3::Object& obj : mShape->mObjects)
       {
          uint32_t objectTransformOffset = mBaseTextureTransform;
-         if (obj.node >= 0)
+         if (obj.node >= 0 && obj.node < mShape->mNodes.size())
          {
             objectTransformOffset += 1 + (uint32_t)obj.node;
          }
@@ -852,7 +830,7 @@ public:
          }
       }
       
-      if (nodeMeshTransformsTex.memoryUsed > maxTransforms)
+      if (nodeMeshTransformsTex.memoryUsed > 0)
       {
          nodeMeshTransformsTex.ensureValid(nodeMeshTransformsTex.memoryUsed, NULL);
       }
@@ -1379,7 +1357,7 @@ public:
       {
          nodeMeshTransformsTex.updateMem[mBaseTextureTransform] = packMatrix43(slm::mat4(1.0f));
       }
-      
+
       for (size_t i=0; i<mNodeTransforms.size(); i++)
       {
          const size_t transformIndex = mBaseTextureTransform + 1 + i;
@@ -1387,13 +1365,13 @@ public:
             break;
          nodeMeshTransformsTex.updateMem[transformIndex] = packMatrix43(mNodeTransforms[i]);
       }
-      
+
       for (RuntimeMeshInfo& rm : mRuntimeMeshInfos)
       {
          Dts3::SkinData* sd = rm.mMesh->getSkinData();
          if (!sd)
             continue;
-         
+
          for (size_t i=0; i<sd->nodeTransforms.size(); i++)
          {
             const size_t transformIndex = rm.mMeshTransformOffset + i;
@@ -1403,7 +1381,7 @@ public:
             slm::mat4 finalTransform = sd->nodeTransforms[i];
             if (i < sd->nodeIndex.size() && sd->nodeIndex[i] < mNodeTransforms.size())
             {
-               finalTransform = mNodeTransforms[sd->nodeIndex[i]] * sd->nodeTransforms[i];
+               finalTransform = sd->nodeTransforms[i] * mNodeTransforms[sd->nodeIndex[i]];
             }
             nodeMeshTransformsTex.updateMem[transformIndex] = packMatrix43(finalTransform);
          }
@@ -1434,7 +1412,11 @@ public:
       // - Apply final transform (based on parent node)
       const size_t nodeCount = mShape->mNodes.size();
       mLocalNodeTransforms.resize(nodeCount, slm::mat4(1.0f));
-      mNodeTransforms.resize(nodeCount, slm::mat4(1.0f));
+      if (mDefaultNodeTransforms.size() != nodeCount)
+         buildDefaultNodeTransforms();
+      mNodeTransforms = mDefaultNodeTransforms;
+      
+#if 0
       std::vector<slm::quat> nodeRotations(nodeCount, slm::quat(0, 0, 0, 1));
       std::vector<slm::vec3> nodeTranslations(nodeCount, slm::vec3(0.0f));
       std::vector<slm::vec3> nodeScales(nodeCount, slm::vec3(1.0f));
@@ -1550,7 +1532,7 @@ public:
             mNodeTransforms[nodeIdx] = localTransform;
          }
       }
-      
+#endif
       updateTransformTexture();
    }
    

@@ -1154,10 +1154,26 @@ struct IO
       return true;
    }
    
+   template<typename T> static bool readMatrixFTransposed(T& ds, slm::mat4& box)
+   {
+      float vals[16];
+      if (!ds.read32(16, vals))
+         return false;
+
+      for (int row = 0; row < 4; row++)
+      {
+         for (int col = 0; col < 4; col++)
+         {
+            box[col][row] = vals[(row * 4) + col];
+         }
+      }
+
+      return true;
+   }
+
    template<typename T> static bool readMatrixF(T& ds, slm::mat4& box)
    {
-      ds.read32(sizeof(box) / 4, &box);
-      return true;
+      return readMatrixFTransposed(ds, box);
    }
    
    template<typename T> static bool writeMatrixF(T& ds, slm::mat4& box)

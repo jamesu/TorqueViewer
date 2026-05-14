@@ -1118,7 +1118,7 @@ struct Quat16
    
    int16_t x, y, z, w;
    
-   Quat16() : x(0),y(0),z(0),w(0) {;}
+   Quat16() : x(0),y(0),z(0),w(MAX_VAL) {;}
    
    Quat16(const slm::quat &src)
    {

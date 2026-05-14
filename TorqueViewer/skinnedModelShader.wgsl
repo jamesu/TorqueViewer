@@ -73,28 +73,23 @@ fn applySkinBlock(
     boneIndices: vec4<u32>,
     boneWeights: vec4<f32>,
     posOut: ptr<function, vec3<f32>>,
-    normalOut: ptr<function, vec3<f32>>,
-    totalWeightOut: ptr<function, f32>
+    normalOut: ptr<function, vec3<f32>>
 ) {
     if (boneWeights.x > 0.0) {
         *posOut += transformPoint(baseTransformIndex + boneIndices.x, position) * boneWeights.x;
         *normalOut += transformNormal(baseTransformIndex + boneIndices.x, normal) * boneWeights.x;
-        *totalWeightOut += boneWeights.x;
     }
     if (boneWeights.y > 0.0) {
         *posOut += transformPoint(baseTransformIndex + boneIndices.y, position) * boneWeights.y;
         *normalOut += transformNormal(baseTransformIndex + boneIndices.y, normal) * boneWeights.y;
-        *totalWeightOut += boneWeights.y;
     }
     if (boneWeights.z > 0.0) {
         *posOut += transformPoint(baseTransformIndex + boneIndices.z, position) * boneWeights.z;
         *normalOut += transformNormal(baseTransformIndex + boneIndices.z, normal) * boneWeights.z;
-        *totalWeightOut += boneWeights.z;
     }
     if (boneWeights.w > 0.0) {
         *posOut += transformPoint(baseTransformIndex + boneIndices.w, position) * boneWeights.w;
         *normalOut += transformNormal(baseTransformIndex + boneIndices.w, normal) * boneWeights.w;
-        *totalWeightOut += boneWeights.w;
     }
 }
 
@@ -103,19 +98,9 @@ fn mainVert(input: VertexInput) -> VertexOutput {
     let transformOffset = u32(commonUniforms.params1.x);
     var skinnedPos = vec3<f32>(0.0);
     var skinnedNormal = vec3<f32>(0.0);
-    var totalWeight = 0.0;
 
-    applySkinBlock(transformOffset, input.aPosition, input.aNormal, input.aBoneIndex0, input.aBoneWeight0, &skinnedPos, &skinnedNormal, &totalWeight);
-    applySkinBlock(transformOffset, input.aPosition, input.aNormal, input.aBoneIndex1, input.aBoneWeight1, &skinnedPos, &skinnedNormal, &totalWeight);
-
-    if (totalWeight == 0.0) {
-        skinnedPos = transformPoint(transformOffset, input.aPosition);
-        skinnedNormal = transformNormal(transformOffset, input.aNormal);
-    } else if (totalWeight < 1.0) {
-        let remainder = 1.0 - totalWeight;
-        skinnedPos += transformPoint(transformOffset, input.aPosition) * remainder;
-        skinnedNormal += transformNormal(transformOffset, input.aNormal) * remainder;
-    }
+    applySkinBlock(transformOffset, input.aPosition, input.aNormal, input.aBoneIndex0, input.aBoneWeight0, &skinnedPos, &skinnedNormal);
+    applySkinBlock(transformOffset, input.aPosition, input.aNormal, input.aBoneIndex1, input.aBoneWeight1, &skinnedPos, &skinnedNormal);
 
     // DEBUG
     //skinnedPos = input.aPosition.xyz;
