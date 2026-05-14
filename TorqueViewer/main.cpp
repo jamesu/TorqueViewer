@@ -780,6 +780,9 @@ public:
       mActiveUniformScales.resize(mShape->mNodes.size(), 1.0f);
       mActiveAlignedScales.resize(mShape->mNodes.size(), slm::vec3(1.0f));
       mActiveArbitraryScales.resize(mShape->mNodes.size());
+      mNodeRotationThreads.resize(mShape->mNodes.size(), -1);
+      mNodeTranslationThreads.resize(mShape->mNodes.size(), -1);
+      mNodeScaleThreads.resize(mShape->mNodes.size(), -1);
       for (size_t i=0; i<mRuntimeSubShapeInfos.size(); i++)
       {
          mRuntimeSubShapeInfos[i].subShapeIndex = (uint32_t)i;
@@ -1016,12 +1019,53 @@ public:
    
    void transitionThreadToSequence(Dts3::Thread& thread, int32_t sequenceIdx, float pos, float duration, bool playing)
    {
-      
+      thread.transitioning = false;
+      thread.transitionState = Dts3::ThreadTransitionState();
+
+      if (thread.sequenceIdx >= 0 && thread.sequenceIdx < mShape->mSequences.size())
+      {
+         Dts3::Sequence& oldSeq = mShape->mSequences[thread.sequenceIdx];
+         thread.transitionState.oldRotations = oldSeq.mattersRot;
+         thread.transitionState.oldTranslations = oldSeq.mattersTranslation;
+         thread.transitionState.oldScales = oldSeq.mattersScale;
+         thread.transitionState.oldSequenceIdx = (uint32_t)thread.sequenceIdx;
+         thread.transitionState.oldPos = thread.pos;
+      }
+
+      setThreadSequence(thread.index, sequenceIdx, pos);
+
+      thread.transitioning = true;
+      thread.transitionState.duration = std::max(duration, 0.0001f);
+      thread.transitionState.pos = 0.0f;
+      thread.transitionState.direction = 1.0f;
+      thread.transitionState.targetScale = 1.0f;
+      thread.playing = playing;
    }
    
    void updateTransitions()
    {
-      // NOTE: this basically updates the reference transform for the transitioning threads
+      mTransitionSets.rotationNodes.reset();
+      mTransitionSets.translationNodes.reset();
+      mTransitionSets.scaleNodes.reset();
+
+      for (uint32_t idx : mTransitionThreads)
+      {
+         if (idx >= mThreads.size())
+            continue;
+         Dts3::Thread& thread = mThreads[idx];
+         if (!thread.transitioning)
+            continue;
+         if (thread.sequenceIdx < 0 || thread.sequenceIdx >= mShape->mSequences.size())
+            continue;
+
+         Dts3::Sequence& seq = mShape->mSequences[thread.sequenceIdx];
+         mTransitionSets.rotationNodes |= thread.transitionState.oldRotations;
+         mTransitionSets.rotationNodes |= seq.mattersRot;
+         mTransitionSets.translationNodes |= thread.transitionState.oldTranslations;
+         mTransitionSets.translationNodes |= seq.mattersTranslation;
+         mTransitionSets.scaleNodes |= thread.transitionState.oldScales;
+         mTransitionSets.scaleNodes |= seq.mattersScale;
+      }
    }
    
    void selectKeyFrames(float pos, Dts3::Sequence& sequence, Dts3::Thread::KeyFrameInfo& outInfo)
@@ -1061,9 +1105,11 @@ public:
       {
          return;
       }
-      
-      // TODO
-      
+
+      thread.transitioning = false;
+      thread.transitionState = Dts3::ThreadTransitionState();
+      mTransitionThreads.erase(std::remove(mTransitionThreads.begin(), mTransitionThreads.end(), (uint32_t)thread.index), mTransitionThreads.end());
+      updateTransitions();
       setDirty(RuntimeSubShapeInfo::ThreadDirty);
    }
    
@@ -1300,10 +1346,6 @@ public:
    
    void advanceThreads(float dt)
    {
-      // General overview:
-      // -
-      
-      
       for (Dts3::Thread& thread : mThreads)
       {
          if (thread.index >= 0 &&
@@ -1312,6 +1354,16 @@ public:
              thread.playing)
          {
             advanceThreadTime(thread, dt);
+
+            if (thread.transitioning)
+            {
+               thread.transitionState.pos += dt / std::max(thread.transitionState.duration, 0.0001f);
+               if (thread.transitionState.pos >= 1.0f)
+               {
+                  thread.transitionState.pos = 1.0f;
+                  clearTransition(thread);
+               }
+            }
          }
       }
 
@@ -1390,6 +1442,214 @@ public:
       GFXUpdateCustomTextureAligned(nodeMeshTransformsTex.texID, nodeMeshTransformsTex.updateMem);
       GFXSetModelTransformTexture(nodeMeshTransformsTex.texID);
    }
+
+   int32_t getNodeMatterIndex(const IntegerSet& matterSet, int32_t nodeIdx) const
+   {
+      int32_t matterIndex = 0;
+      for (int32_t it = (int32_t)matterSet.findFirst(); it >= 0; it = (int32_t)matterSet.findNext(it + 1))
+      {
+         if (it == nodeIdx)
+            return matterIndex;
+         matterIndex++;
+      }
+      return -1;
+   }
+
+   bool sampleSequenceRotationForNode(Dts3::Sequence& sequence, const Dts3::Thread::KeyFrameInfo& keyInfo, int32_t nodeIdx, slm::quat& outRotation)
+   {
+      int32_t rotIndex = getNodeMatterIndex(sequence.mattersRot, nodeIdx);
+      if (rotIndex < 0)
+         return false;
+      slm::quat rotA = mShape->getSequenceRotation(sequence, keyInfo.keyA, rotIndex).toQuat();
+      slm::quat rotB = mShape->getSequenceRotation(sequence, keyInfo.keyB, rotIndex).toQuat();
+      outRotation = CompatInterpolate(rotA, rotB, keyInfo.keyPos);
+      return true;
+   }
+
+   bool sampleSequenceTranslationForNode(Dts3::Sequence& sequence, const Dts3::Thread::KeyFrameInfo& keyInfo, int32_t nodeIdx, slm::vec3& outTranslation)
+   {
+      int32_t transIndex = getNodeMatterIndex(sequence.mattersTranslation, nodeIdx);
+      if (transIndex < 0)
+         return false;
+      slm::vec3 transA = mShape->getSequenceTranslation(sequence, keyInfo.keyA, transIndex);
+      slm::vec3 transB = mShape->getSequenceTranslation(sequence, keyInfo.keyB, transIndex);
+      outTranslation = slm::mix(transA, transB, keyInfo.keyPos);
+      return true;
+   }
+
+   bool sampleSequenceScaleForNode(Dts3::Sequence& sequence, const Dts3::Thread::KeyFrameInfo& keyInfo, int32_t nodeIdx, slm::vec3& outScale)
+   {
+      int32_t scaleIndex = getNodeMatterIndex(sequence.mattersScale, nodeIdx);
+      if (scaleIndex < 0)
+         return false;
+
+      if (sequence.testFlags(Dts3::Sequence::ArbitraryScale))
+      {
+         Dts3::ArbitraryScale scaleA = mShape->getSequenceArbitraryScale(sequence, keyInfo.keyA, scaleIndex);
+         Dts3::ArbitraryScale scaleB = mShape->getSequenceArbitraryScale(sequence, keyInfo.keyB, scaleIndex);
+         outScale = slm::mix(scaleA.pos, scaleB.pos, keyInfo.keyPos);
+      }
+      else if (sequence.testFlags(Dts3::Sequence::AlignedScale))
+      {
+         slm::vec3 scaleA = mShape->getSequenceAlignedScale(sequence, keyInfo.keyA, scaleIndex);
+         slm::vec3 scaleB = mShape->getSequenceAlignedScale(sequence, keyInfo.keyB, scaleIndex);
+         outScale = slm::mix(scaleA, scaleB, keyInfo.keyPos);
+      }
+      else if (sequence.testFlags(Dts3::Sequence::UniformScale))
+      {
+         float scaleA = mShape->getSequenceUniformScale(sequence, keyInfo.keyA, scaleIndex);
+         float scaleB = mShape->getSequenceUniformScale(sequence, keyInfo.keyB, scaleIndex);
+         float uniformScale = slm::mix(scaleA, scaleB, keyInfo.keyPos);
+         outScale = slm::vec3(uniformScale);
+      }
+      else
+      {
+         return false;
+      }
+
+      return true;
+   }
+
+   void initializeActiveNodeTransforms(const Dts3::SubShape& subShape)
+   {
+      const size_t nodeCount = mShape->mNodes.size();
+      for (size_t nodeIdx = 0; nodeIdx < nodeCount; nodeIdx++)
+      {
+         mActiveRotations[nodeIdx] = mShape->getDefaultNodeRotation((int32_t)nodeIdx);
+         mActiveTranslations[nodeIdx] = slm::vec4(mShape->getDefaultNodeTranslation((int32_t)nodeIdx), 1.0f);
+         mActiveAlignedScales[nodeIdx] = mShape->getDefaultNodeScale((int32_t)nodeIdx);
+         mActiveUniformScales[nodeIdx] = 1.0f;
+         mActiveArbitraryScales[nodeIdx].rot = Quat16();
+         mActiveArbitraryScales[nodeIdx].pos = slm::vec3(1.0f);
+      }
+
+      const int32_t firstNode = std::max(subShape.firstNode, 0);
+      const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)nodeCount);
+      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
+      {
+         mNodeRotationThreads[nodeIdx] = -1;
+         mNodeTranslationThreads[nodeIdx] = -1;
+         mNodeScaleThreads[nodeIdx] = -1;
+      }
+   }
+
+   void applyBaseSequence(Dts3::Thread& thread, const Dts3::SubShape& subShape, std::vector<bool>& rotationSet, std::vector<bool>& translationSet, std::vector<bool>& scaleSet)
+   {
+      Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+      const int32_t firstNode = std::max(subShape.firstNode, 0);
+      const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)mShape->mNodes.size());
+
+      int32_t rotFrame = 0;
+      for (int32_t nodeIdx = (int32_t)sequence.mattersRot.findFirst();
+           nodeIdx >= 0;
+           nodeIdx = (int32_t)sequence.mattersRot.findNext(nodeIdx + 1))
+      {
+         if (nodeIdx < firstNode || nodeIdx >= endNode)
+         {
+            rotFrame++;
+            continue;
+         }
+
+         if (!rotationSet[nodeIdx])
+         {
+            slm::quat rotA = mShape->getSequenceRotation(sequence, thread.keyInfo.keyA, rotFrame).toQuat();
+            slm::quat rotB = mShape->getSequenceRotation(sequence, thread.keyInfo.keyB, rotFrame).toQuat();
+            mActiveRotations[nodeIdx] = CompatInterpolate(rotA, rotB, thread.keyInfo.keyPos);
+            rotationSet[nodeIdx] = true;
+            mNodeRotationThreads[nodeIdx] = thread.index;
+         }
+         rotFrame++;
+      }
+
+      int32_t transFrame = 0;
+      for (int32_t nodeIdx = (int32_t)sequence.mattersTranslation.findFirst();
+           nodeIdx >= 0;
+           nodeIdx = (int32_t)sequence.mattersTranslation.findNext(nodeIdx + 1))
+      {
+         if (nodeIdx < firstNode || nodeIdx >= endNode)
+         {
+            transFrame++;
+            continue;
+         }
+
+         if (!translationSet[nodeIdx])
+         {
+            slm::vec3 transA = mShape->getSequenceTranslation(sequence, thread.keyInfo.keyA, transFrame);
+            slm::vec3 transB = mShape->getSequenceTranslation(sequence, thread.keyInfo.keyB, transFrame);
+            mActiveTranslations[nodeIdx] = slm::vec4(slm::mix(transA, transB, thread.keyInfo.keyPos), 1.0f);
+            translationSet[nodeIdx] = true;
+            mNodeTranslationThreads[nodeIdx] = thread.index;
+         }
+         transFrame++;
+      }
+
+      int32_t scaleFrame = 0;
+      for (int32_t nodeIdx = (int32_t)sequence.mattersScale.findFirst();
+           nodeIdx >= 0;
+           nodeIdx = (int32_t)sequence.mattersScale.findNext(nodeIdx + 1))
+      {
+         if (nodeIdx < firstNode || nodeIdx >= endNode)
+         {
+            scaleFrame++;
+            continue;
+         }
+
+         if (!scaleSet[nodeIdx])
+         {
+            slm::vec3 scaleValue(1.0f);
+            if (sequence.testFlags(Dts3::Sequence::ArbitraryScale))
+            {
+               Dts3::ArbitraryScale scaleA = mShape->getSequenceArbitraryScale(sequence, thread.keyInfo.keyA, scaleFrame);
+               Dts3::ArbitraryScale scaleB = mShape->getSequenceArbitraryScale(sequence, thread.keyInfo.keyB, scaleFrame);
+               mActiveArbitraryScales[nodeIdx].pos = slm::mix(scaleA.pos, scaleB.pos, thread.keyInfo.keyPos);
+               mActiveArbitraryScales[nodeIdx].rot = scaleA.rot;
+               scaleValue = mActiveArbitraryScales[nodeIdx].pos;
+            }
+            else if (sequence.testFlags(Dts3::Sequence::AlignedScale))
+            {
+               slm::vec3 scaleA = mShape->getSequenceAlignedScale(sequence, thread.keyInfo.keyA, scaleFrame);
+               slm::vec3 scaleB = mShape->getSequenceAlignedScale(sequence, thread.keyInfo.keyB, scaleFrame);
+               scaleValue = slm::mix(scaleA, scaleB, thread.keyInfo.keyPos);
+            }
+            else if (sequence.testFlags(Dts3::Sequence::UniformScale))
+            {
+               float scaleA = mShape->getSequenceUniformScale(sequence, thread.keyInfo.keyA, scaleFrame);
+               float scaleB = mShape->getSequenceUniformScale(sequence, thread.keyInfo.keyB, scaleFrame);
+               float uniformScale = slm::mix(scaleA, scaleB, thread.keyInfo.keyPos);
+               mActiveUniformScales[nodeIdx] = uniformScale;
+               scaleValue = slm::vec3(uniformScale);
+            }
+
+            mActiveAlignedScales[nodeIdx] = scaleValue;
+            scaleSet[nodeIdx] = true;
+            mNodeScaleThreads[nodeIdx] = thread.index;
+         }
+         scaleFrame++;
+      }
+   }
+
+   void buildAnimatedNodeTransforms(const Dts3::SubShape& subShape)
+   {
+      const int32_t firstNode = std::max(subShape.firstNode, 0);
+      const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)mShape->mNodes.size());
+      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
+      {
+         slm::mat4 localTransform;
+         CompatQuatSetMatrix(mActiveRotations[nodeIdx], localTransform);
+         localTransform[3] = mActiveTranslations[nodeIdx];
+
+         if (mApplyScaleTransforms)
+            localTransform = localTransform * slm::scaling(mActiveAlignedScales[nodeIdx]);
+
+         mLocalNodeTransforms[nodeIdx] = localTransform;
+
+         int32_t parentIdx = mShape->mNodes[nodeIdx].parent;
+         if (parentIdx >= 0 && parentIdx < mNodeTransforms.size())
+            mNodeTransforms[nodeIdx] = mNodeTransforms[parentIdx] * localTransform;
+         else
+            mNodeTransforms[nodeIdx] = localTransform;
+      }
+   }
    
    void animateNodes(Dts3::SubShape& subShape)
    {
@@ -1412,138 +1672,125 @@ public:
       // - Apply final transform (based on parent node)
       const size_t nodeCount = mShape->mNodes.size();
       mLocalNodeTransforms.resize(nodeCount, slm::mat4(1.0f));
+      mNodeTransforms.resize(nodeCount, slm::mat4(1.0f));
       if (mDefaultNodeTransforms.size() != nodeCount)
          buildDefaultNodeTransforms();
-      mNodeTransforms = mDefaultNodeTransforms;
-      
-#if 0
-      std::vector<slm::quat> nodeRotations(nodeCount, slm::quat(0, 0, 0, 1));
-      std::vector<slm::vec3> nodeTranslations(nodeCount, slm::vec3(0.0f));
-      std::vector<slm::vec3> nodeScales(nodeCount, slm::vec3(1.0f));
 
-      const int32_t firstNode = std::max(subShape.firstNode, 0);
-      const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)nodeCount);
-      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
-      {
-         if (nodeIdx < mShape->mDefaultRotations.size())
-            nodeRotations[nodeIdx] = mShape->mDefaultRotations[nodeIdx].toQuat();
-         if (nodeIdx < mShape->mDefaultTranslations.size())
-            nodeTranslations[nodeIdx] = mShape->mDefaultTranslations[nodeIdx];
-      }
+      initializeActiveNodeTransforms(subShape);
 
       std::vector<bool> rotationSet(nodeCount, false);
       std::vector<bool> translationSet(nodeCount, false);
       std::vector<bool> scaleSet(nodeCount, false);
 
+      for (uint32_t num : mSortedThreads)
+      {
+         if (num >= mThreads.size())
+            continue;
+         Dts3::Thread& thread = mThreads[num];
+         if (thread.index < 0)
+            continue;
+         if (thread.sequenceIdx < 0 || thread.sequenceIdx >= mShape->mSequences.size())
+            continue;
+
+         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+         if (sequence.testFlags(Dts3::Sequence::Blend))
+            break;
+
+         applyBaseSequence(thread, subShape, rotationSet, translationSet, scaleSet);
+      }
+
       forEachSortedThread([&](Dts3::Thread& thread){
          Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
-         int32_t rotFrame = 0;
-         int32_t transFrame = 0;
-         int32_t scaleFrame = 0;
-
-         for (int32_t nodeIdx = sequence.mattersRot.findFirst();
-              nodeIdx >= 0;
-              nodeIdx = sequence.mattersRot.findNext(nodeIdx))
-         {
-            if (nodeIdx < firstNode || nodeIdx >= endNode)
-               continue;
-
-            if (!rotationSet[nodeIdx])
-            {
-               slm::quat rotA = mShape->getSequenceRotation(sequence, thread.keyInfo.keyA, rotFrame).toQuat();
-               slm::quat rotB = mShape->getSequenceRotation(sequence, thread.keyInfo.keyB, rotFrame).toQuat();
-               nodeRotations[nodeIdx] = CompatInterpolate(rotA, rotB, thread.keyInfo.keyPos);
-               rotationSet[nodeIdx] = true;
-            }
-            rotFrame++;
-         }
-
-         for (int32_t nodeIdx = sequence.mattersTranslation.findFirst();
-              nodeIdx >= 0;
-              nodeIdx = sequence.mattersTranslation.findNext(nodeIdx))
-         {
-            if (nodeIdx < firstNode || nodeIdx >= endNode)
-               continue;
-
-            if (!translationSet[nodeIdx])
-            {
-               slm::vec3 transA = mShape->getSequenceTranslation(sequence, thread.keyInfo.keyA, transFrame);
-               slm::vec3 transB = mShape->getSequenceTranslation(sequence, thread.keyInfo.keyB, transFrame);
-               nodeTranslations[nodeIdx] = slm::mix(transA, transB, thread.keyInfo.keyPos);
-               translationSet[nodeIdx] = true;
-            }
-            transFrame++;
-         }
-
-         for (int32_t nodeIdx = sequence.mattersScale.findFirst();
-              nodeIdx >= 0;
-              nodeIdx = sequence.mattersScale.findNext(nodeIdx))
-         {
-            if (nodeIdx < firstNode || nodeIdx >= endNode)
-               continue;
-
-            if (!scaleSet[nodeIdx])
-            {
-               if (sequence.testFlags(Dts3::Sequence::ArbitraryScale))
-               {
-                  Dts3::ArbitraryScale scaleA = mShape->getSequenceArbitraryScale(sequence, thread.keyInfo.keyA, scaleFrame);
-                  Dts3::ArbitraryScale scaleB = mShape->getSequenceArbitraryScale(sequence, thread.keyInfo.keyB, scaleFrame);
-                  nodeScales[nodeIdx] = slm::mix(scaleA.pos, scaleB.pos, thread.keyInfo.keyPos);
-               }
-               else if (sequence.testFlags(Dts3::Sequence::AlignedScale))
-               {
-                  slm::vec3 scaleA = mShape->getSequenceAlignedScale(sequence, thread.keyInfo.keyA, scaleFrame);
-                  slm::vec3 scaleB = mShape->getSequenceAlignedScale(sequence, thread.keyInfo.keyB, scaleFrame);
-                  nodeScales[nodeIdx] = slm::mix(scaleA, scaleB, thread.keyInfo.keyPos);
-               }
-               else if (sequence.testFlags(Dts3::Sequence::UniformScale))
-               {
-                  float scaleA = mShape->getSequenceUniformScale(sequence, thread.keyInfo.keyA, scaleFrame);
-                  float scaleB = mShape->getSequenceUniformScale(sequence, thread.keyInfo.keyB, scaleFrame);
-                  float uniformScale = slm::mix(scaleA, scaleB, thread.keyInfo.keyPos);
-                  nodeScales[nodeIdx] = slm::vec3(uniformScale);
-               }
-               scaleSet[nodeIdx] = true;
-            }
-            scaleFrame++;
-         }
+         if (sequence.testFlags(Dts3::Sequence::Blend) && !thread.noBlend)
+            applyBlendSequence(thread, subShape);
       });
 
-      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
-      {
-         slm::mat4 localTransform;
-         CompatQuatSetMatrix(nodeRotations[nodeIdx], localTransform);
-         localTransform[3] = slm::vec4(nodeTranslations[nodeIdx], 1.0f);
-
-         if (mApplyScaleTransforms)
-         {
-            localTransform = localTransform * slm::scaling(nodeScales[nodeIdx]);
-         }
-
-         mLocalNodeTransforms[nodeIdx] = localTransform;
-
-         int32_t parentIdx = mShape->mNodes[nodeIdx].parent;
-         if (parentIdx >= 0 && parentIdx < mNodeTransforms.size())
-         {
-            mNodeTransforms[nodeIdx] = mNodeTransforms[parentIdx] * localTransform;
-         }
-         else
-         {
-            mNodeTransforms[nodeIdx] = localTransform;
-         }
-      }
-#endif
+      applyTransitionNodes(subShape);
+      buildAnimatedNodeTransforms(subShape);
       updateTransformTexture();
    }
    
    void applyBlendSequence(Dts3::Thread& thread, const Dts3::SubShape& subShape)
    {
-      
+      if (thread.sequenceIdx < 0 || thread.sequenceIdx >= mShape->mSequences.size())
+         return;
+
+      Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+      const int32_t firstNode = std::max(subShape.firstNode, 0);
+      const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)mShape->mNodes.size());
+
+      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
+      {
+         slm::quat blendRot;
+         if (sampleSequenceRotationForNode(sequence, thread.keyInfo, nodeIdx, blendRot))
+            mActiveRotations[nodeIdx] = slm::normalize(mActiveRotations[nodeIdx] * blendRot);
+
+         slm::vec3 blendTrans;
+         if (sampleSequenceTranslationForNode(sequence, thread.keyInfo, nodeIdx, blendTrans))
+            mActiveTranslations[nodeIdx] += slm::vec4(blendTrans, 0.0f);
+
+         slm::vec3 blendScale;
+         if (sampleSequenceScaleForNode(sequence, thread.keyInfo, nodeIdx, blendScale))
+            mActiveAlignedScales[nodeIdx] *= blendScale;
+      }
    }
    
    void applyTransitionNodes(const Dts3::SubShape& subShape)
    {
-      
+      const int32_t firstNode = std::max(subShape.firstNode, 0);
+      const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)mShape->mNodes.size());
+
+      for (uint32_t threadIdx : mTransitionThreads)
+      {
+         if (threadIdx >= mThreads.size())
+            continue;
+         Dts3::Thread& thread = mThreads[threadIdx];
+         if (!thread.transitioning)
+            continue;
+         if (thread.sequenceIdx < 0 || thread.sequenceIdx >= mShape->mSequences.size())
+            continue;
+         if (thread.transitionState.oldSequenceIdx >= mShape->mSequences.size())
+            continue;
+
+         Dts3::Sequence& oldSequence = mShape->mSequences[thread.transitionState.oldSequenceIdx];
+         Dts3::Sequence& newSequence = mShape->mSequences[thread.sequenceIdx];
+         Dts3::Thread::KeyFrameInfo oldKeyInfo;
+         selectKeyFrames(thread.transitionState.oldPos, oldSequence, oldKeyInfo);
+         float t = std::clamp(thread.transitionState.pos * thread.transitionState.targetScale, 0.0f, 1.0f);
+
+         for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
+         {
+            const bool affectsRot = thread.transitionState.oldRotations.test(nodeIdx) || newSequence.mattersRot.test(nodeIdx);
+            if (affectsRot)
+            {
+               slm::quat oldRot = mShape->getDefaultNodeRotation(nodeIdx);
+               slm::quat newRot = mShape->getDefaultNodeRotation(nodeIdx);
+               sampleSequenceRotationForNode(oldSequence, oldKeyInfo, nodeIdx, oldRot);
+               sampleSequenceRotationForNode(newSequence, thread.keyInfo, nodeIdx, newRot);
+               mActiveRotations[nodeIdx] = CompatInterpolate(oldRot, newRot, t);
+            }
+
+            const bool affectsTrans = thread.transitionState.oldTranslations.test(nodeIdx) || newSequence.mattersTranslation.test(nodeIdx);
+            if (affectsTrans)
+            {
+               slm::vec3 oldTrans = mShape->getDefaultNodeTranslation(nodeIdx);
+               slm::vec3 newTrans = mShape->getDefaultNodeTranslation(nodeIdx);
+               sampleSequenceTranslationForNode(oldSequence, oldKeyInfo, nodeIdx, oldTrans);
+               sampleSequenceTranslationForNode(newSequence, thread.keyInfo, nodeIdx, newTrans);
+               mActiveTranslations[nodeIdx] = slm::vec4(slm::mix(oldTrans, newTrans, t), 1.0f);
+            }
+
+            const bool affectsScale = thread.transitionState.oldScales.test(nodeIdx) || newSequence.mattersScale.test(nodeIdx);
+            if (affectsScale)
+            {
+               slm::vec3 oldScale = mShape->getDefaultNodeScale(nodeIdx);
+               slm::vec3 newScale = mShape->getDefaultNodeScale(nodeIdx);
+               sampleSequenceScaleForNode(oldSequence, oldKeyInfo, nodeIdx, oldScale);
+               sampleSequenceScaleForNode(newSequence, thread.keyInfo, nodeIdx, newScale);
+               mActiveAlignedScales[nodeIdx] = slm::mix(oldScale, newScale, t);
+            }
+         }
+      }
    }
    
    void animateVisibility(const Dts3::SubShape& subShape)

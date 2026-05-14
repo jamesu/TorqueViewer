@@ -1030,6 +1030,25 @@ public:
    Sequence* getSequence(const std::string_view& name);
    
    bool checkSkip(int meshNumber, int currentObject, int currentDecal, int skipDetailLevel);
+
+   inline slm::quat getDefaultNodeRotation(int32_t nodeIndex) const
+   {
+      if (nodeIndex >= 0 && nodeIndex < mDefaultRotations.size())
+         return mDefaultRotations[nodeIndex].toQuat();
+      return slm::quat(0, 0, 0, 1);
+   }
+
+   inline slm::vec3 getDefaultNodeTranslation(int32_t nodeIndex) const
+   {
+      if (nodeIndex >= 0 && nodeIndex < mDefaultTranslations.size())
+         return mDefaultTranslations[nodeIndex];
+      return slm::vec3(0.0f);
+   }
+
+   inline slm::vec3 getDefaultNodeScale(int32_t) const
+   {
+      return slm::vec3(1.0f);
+   }
    
    inline slm::vec3 getSequenceTranslation(Dts3::Sequence& sequence, int32_t frame, int32_t rotIndex)
    {
