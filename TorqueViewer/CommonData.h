@@ -626,15 +626,17 @@ enum
 template<const std::size_t BitSize> class BitSet
 {
 public:
+    using WordType = uint32_t;
+
     enum
     {
-        WordBits = sizeof(std::size_t) * 8,
-        WordSize = sizeof(std::size_t),
-        TotalWords = (BitSize+sizeof(std::size_t)-1) / sizeof(std::size_t)
+        WordBits = sizeof(WordType) * 8,
+        WordSize = sizeof(WordType),
+        TotalWords = (BitSize + WordBits - 1) / WordBits
     };
 
 public:
-    std::size_t mWords[TotalWords];
+    WordType mWords[TotalWords];
 
 public:
 
@@ -655,15 +657,15 @@ public:
 
     inline bool test(std::size_t pos) const
     {
-        std::size_t offset = pos / WordSize;
-        return (mWords[offset] & BIT(pos % WordSize)) != 0;
+        std::size_t offset = pos / WordBits;
+        return (mWords[offset] & BIT(pos % WordBits)) != 0;
     }
 
     bool all()
     {
         for (std::size_t i=0; i<TotalWords; i++)
         {
-            if (mWords[i] != SIZE_MAX)
+            if (mWords[i] != UINT32_MAX)
                 return false;
         }
 
@@ -711,13 +713,12 @@ public:
 
     inline std::size_t setWordSize() const
     {
-      std::size_t lastSize = 0;
-      for (std::size_t i=0; i<TotalWords; i++)
+      for (std::size_t i = TotalWords; i > 0; --i)
       {
-         if (mWords[i] != 0)
-            lastSize = i;
+         if (mWords[i - 1] != 0)
+            return i;
       }
-      return lastSize;
+      return 0;
     }
 
     inline void set()
@@ -727,8 +728,12 @@ public:
 
     inline void set(std::size_t pos, bool value)
     {
-        std::size_t offset = pos / WordSize;
-        mWords[offset] |= BIT(pos % WordSize);
+        std::size_t offset = pos / WordBits;
+        WordType mask = BIT(pos % WordBits);
+        if (value)
+            mWords[offset] |= mask;
+        else
+            mWords[offset] &= ~mask;
     }
 
     inline void diff(const BitSet<BitSize>& other)
@@ -763,8 +768,7 @@ public:
 
     inline void flip(std::size_t pos, bool value)
     {
-        std::size_t offset = pos / WordSize;
-        mWords[offset] &= ~BIT(pos % WordSize);
+        set(pos, !value);
     }
 
     BitSet<BitSize>& operator&=(const BitSet<BitSize>& other)
@@ -817,11 +821,12 @@ public:
 
     std::ptrdiff_t findLast() const
     {
-      for (std::size_t i = TotalWords-1; i >=0; i--)
+      for (std::size_t i = TotalWords; i > 0; --i)
       {
-         if (mWords[i] != 0)
+         const WordType word = mWords[i - 1];
+         if (word != 0)
          {
-            return (std::ptrdiff_t)((i * WordBits) + ((WordBits-1) - std::countl_zero(mWords[i]))); 
+            return (std::ptrdiff_t)(((i - 1) * WordBits) + ((WordBits - 1) - std::countl_zero(word)));
          }
       }
       return -1;
@@ -834,7 +839,7 @@ public:
 
       for (std::size_t i = startWord; i < TotalWords; i++)
       {
-         std::size_t val = mWords[i];
+         WordType val = mWords[i];
          val >>= wordShift;
          if (val != 0)
          {
@@ -846,7 +851,7 @@ public:
     }
 };
 
-template<const std::size_t BS> BitSet<BS>& operator&(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
+template<const std::size_t BS> BitSet<BS> operator&(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
 {
     BitSet<BS> out = lhs;
     for (std::size_t i=0; i<BitSet<BS>::TotalWords; i++)
@@ -856,7 +861,7 @@ template<const std::size_t BS> BitSet<BS>& operator&(const BitSet<BS>& lhs,const
     return out;
 }
 
-template<const std::size_t BS> BitSet<BS>& operator|(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
+template<const std::size_t BS> BitSet<BS> operator|(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
 {
     BitSet<BS> out = lhs;
     for (std::size_t i=0; i<BitSet<BS>::TotalWords; i++)
@@ -866,7 +871,7 @@ template<const std::size_t BS> BitSet<BS>& operator|(const BitSet<BS>& lhs,const
     return out;
 }
 
-template<const std::size_t BS> BitSet<BS>& operator^(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
+template<const std::size_t BS> BitSet<BS> operator^(const BitSet<BS>& lhs,const BitSet<BS>& rhs)
 {
     BitSet<BS> out = lhs;
     for (std::size_t i=0; i<BitSet<BS>::TotalWords; i++)
