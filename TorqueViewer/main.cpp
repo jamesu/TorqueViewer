@@ -1433,7 +1433,7 @@ public:
             slm::mat4 finalTransform = sd->nodeTransforms[i];
             if (i < sd->nodeIndex.size() && sd->nodeIndex[i] < mNodeTransforms.size())
             {
-               finalTransform = sd->nodeTransforms[i] * mNodeTransforms[sd->nodeIndex[i]];
+               finalTransform = mNodeTransforms[sd->nodeIndex[i]] * sd->nodeTransforms[i];
             }
             nodeMeshTransformsTex.updateMem[transformIndex] = packMatrix43(finalTransform);
          }
