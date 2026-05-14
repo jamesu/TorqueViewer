@@ -117,6 +117,11 @@ fn mainVert(input: VertexInput) -> VertexOutput {
         skinnedNormal += transformNormal(transformOffset, input.aNormal) * remainder;
     }
 
+    // DEBUG
+    //skinnedPos = input.aPosition.xyz;
+    //skinnedNormal = input.aNormal.xyz;
+    // END DEBUG
+
     let worldPos = commonUniforms.modelMat * vec4<f32>(skinnedPos, 1.0);
     let worldNormal = normalize((commonUniforms.modelMat * vec4<f32>(normalize(skinnedNormal), 0.0)).xyz);
     let lightDir = normalize(commonUniforms.lightPos.xyz - worldPos.xyz);
@@ -133,11 +138,11 @@ fn mainVert(input: VertexInput) -> VertexOutput {
 fn mainFrag(input: VertexOutput) -> FragmentOutput {
     let texColor = textureSample(diffuseTex, diffuseSampler, input.vTexCoord0);
 
-    if (texColor.a < commonUniforms.params2.x) {
-        discard;
-    }
+    //if (texColor.a < commonUniforms.params2.x) {
+    //    discard;
+    //}
 
     var out: FragmentOutput;
-    out.Color = vec4<f32>(texColor.rgb * input.vLighting, texColor.a);
+    out.Color = vec4<f32>(texColor.rgb,1);//vec4<f32>(texColor.rgb /* input.vLighting*/, texColor.a);
     return out;
 }

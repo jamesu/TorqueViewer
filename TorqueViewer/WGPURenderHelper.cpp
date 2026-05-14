@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <strings.h>
 #include <algorithm>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -71,6 +72,8 @@ static inline size_t AlignSize(const size_t size, const uint16_t alignment)
 {
    return (size + (alignment - 1)) & ~(alignment - 1);
 }
+
+static constexpr size_t CommonUniformBufferSize = 64 * 1024;
 
 struct CommonUniformStruct
 {
@@ -159,6 +162,7 @@ struct SDLState
    struct BufferRef
    {
       WGPUBuffer buffer;
+      WGPUBindGroup bindGroup;
       size_t offset;
       size_t size;
    };
@@ -167,6 +171,15 @@ struct SDLState
    {
       WGPUBuffer buffer;
       uint32_t flags;
+      uint32_t frameSlot;
+      size_t head;
+      size_t size;
+   };
+
+   struct CommonUniformAlloc
+   {
+      WGPUBuffer buffer;
+      WGPUBindGroup bindGroup;
       uint32_t frameSlot;
       size_t head;
       size_t size;
@@ -209,6 +222,7 @@ struct SDLState
    // Resource state
    std::unordered_map<std::string, WGPUShaderModule> shaders;
    std::vector<BufferAlloc> buffers;
+   std::vector<CommonUniformAlloc> commonUniformAllocs;
    
    WGPUSampler modelCommonSampler;
    WGPUSampler modelCommonLinearSampler;
@@ -218,9 +232,7 @@ struct SDLState
    WGPUBindGroupLayout modelTransformLayout;
    WGPUBindGroupLayout terrainTextureLayout;
    WGPUBindGroupLayout terrainSamplersLayout;
-   WGPUBindGroup commonUniformGroup;
    WGPUBindGroup currentModelTransformGroup;
-   BufferRef commonUniformBuffer;
    int32_t currentModelTransformTexID;
    
    LineProgramInfo lineProgram;
@@ -295,7 +307,7 @@ struct SDLState
    void resetWGPUState();
    void resetWGPUSwapChain();
    
-   bool loadShaderModule(const char* name, const char* code);
+   bool loadShaderModule(const char* name, const char* path, const char* fallbackCode);
    BufferRef allocBuffer(size_t size, uint32_t flags, uint16_t alignment);
    void resetBufferAllocs(uint32_t frameSlot);
    
@@ -305,6 +317,7 @@ struct SDLState
    WGPUBindGroup makeSimpleTextureBG(WGPUTextureView tex, WGPUSampler sampler);
    WGPUBindGroup makeModelTransformBG(WGPUTextureView tex);
    WGPUBindGroup makeTerrainTextureBG(WGPUTextureView squareMatTex, WGPUTextureView heightmapTex, WGPUTextureView mapTex, WGPUTextureView lmTex, WGPUSampler samplerPixel, WGPUSampler samplerLinear);
+   BufferRef allocCommonUniformData(size_t size);
    WGPURenderPassDescriptor createRenderPass(bool secondary);
 };
 
@@ -769,9 +782,9 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    imInfo.RenderTargetFormat = WGPUTextureFormat_BGRA8Unorm;
    imInfo.DepthStencilFormat = smState.depthStencilFormat;
    
-   smState.loadShaderModule("lineShader", sLineShaderCode);
-   smState.loadShaderModule("modelShader", sModelShaderCode);
-   smState.loadShaderModule("terrainShader", sTerrainShaderCode);
+   smState.loadShaderModule("lineShader", "lineShader.wgsl", sLineShaderCode);
+   smState.loadShaderModule("modelShader", "skinnedModelShader.wgsl", sModelShaderCode);
+   smState.loadShaderModule("terrainShader", "terrainShader.wgsl", sTerrainShaderCode);
    
    // Init gui
    IMGUI_CHECKVERSION();
@@ -847,10 +860,6 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    bindGroupLayoutEntries1[1].visibility = WGPUShaderStage_Fragment;
    bindGroupLayoutEntries1[1].sampler.type = WGPUSamplerBindingType_Filtering;
    
-   // Uniform buffer setup
-   
-   smState.commonUniformBuffer = smState.allocBuffer(sizeof(CommonUniformStruct), WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform, 256);
-   
    WGPUBindGroupLayoutDescriptor bindGroupLayoutDesc1 = {};
    bindGroupLayoutDesc1.label = WGPUString("Texture/Sampler Bind Group Layout");
    bindGroupLayoutDesc1.entryCount = 2;
@@ -925,20 +934,7 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    bindGroupLayoutDescTER.entries = bindGroupLayoutEntriesTER;
    
    smState.terrainTextureLayout = wgpuDeviceCreateBindGroupLayout(smState.gpuDevice, &bindGroupLayoutDescTER);
-   
-   WGPUBindGroupEntry commonEntry = {};
-   commonEntry.binding = 0;
-   commonEntry.buffer = smState.commonUniformBuffer.buffer;
-   commonEntry.offset = 0;
-   commonEntry.size = sizeof(CommonUniformStruct);
-   
-   WGPUBindGroupDescriptor commonDesc = {};
-   commonDesc.label = WGPUString("CommonUniformStruct");
-   commonDesc.layout = smState.commonUniformLayout;
-   commonDesc.entryCount = 1;
-   commonDesc.entries = &commonEntry;
-   smState.commonUniformGroup = wgpuDeviceCreateBindGroup(smState.gpuDevice, &commonDesc);
-   
+
    smState.modelProgram = buildModelProgram();
    smState.lineProgram = buildLineProgram();
    smState.terrainProgram = buildTerrainProgram();
@@ -955,7 +951,6 @@ SDLState::SDLState()
    commonTextureLayout = NULL;
    modelTransformLayout = NULL;
    terrainTextureLayout = NULL;
-   commonUniformGroup = NULL;
    currentModelTransformGroup = NULL;
    currentModelTransformTexID = -1;
    
@@ -1250,14 +1245,20 @@ void SDLState::resetWGPUState()
    lineProgram.reset();
    modelProgram.reset();
    
-   if (commonUniformGroup)
-   {
-      wgpuBindGroupRelease(commonUniformGroup);
+   if (commonUniformLayout)
       wgpuBindGroupLayoutRelease(commonUniformLayout);
+   if (commonTextureLayout)
       wgpuBindGroupLayoutRelease(commonTextureLayout);
-      if (modelTransformLayout)
-         wgpuBindGroupLayoutRelease(modelTransformLayout);
+   if (modelTransformLayout)
+      wgpuBindGroupLayoutRelease(modelTransformLayout);
+   if (terrainTextureLayout)
       wgpuBindGroupLayoutRelease(terrainTextureLayout);
+   for (CommonUniformAlloc& alloc : commonUniformAllocs)
+   {
+      if (alloc.bindGroup)
+         wgpuBindGroupRelease(alloc.bindGroup);
+      if (alloc.buffer)
+         wgpuBufferRelease(alloc.buffer);
    }
    if (currentModelTransformGroup)
    {
@@ -1287,13 +1288,13 @@ void SDLState::resetWGPUState()
    
    shaders.clear();
    buffers.clear();
+   commonUniformAllocs.clear();
    
    modelCommonSampler = NULL;
    commonUniformLayout = NULL;
    commonTextureLayout = NULL;
    modelTransformLayout = NULL;
    terrainTextureLayout = NULL;
-   commonUniformGroup = NULL;
    currentModelTransformGroup = NULL;
    currentModelTransformTexID = -1;
 }
@@ -1335,6 +1336,54 @@ WGPUBindGroup SDLState::makeModelTransformBG(WGPUTextureView tex)
    bindGroupDesc.entries = &bindGroupEntry;
    
    return wgpuDeviceCreateBindGroup(gpuDevice, &bindGroupDesc);
+}
+
+SDLState::BufferRef SDLState::allocCommonUniformData(size_t size)
+{
+   for (CommonUniformAlloc& alloc : commonUniformAllocs)
+   {
+      if (alloc.frameSlot != frameSlot)
+         continue;
+
+      const size_t alignedHead = AlignSize(alloc.head, 256);
+      const size_t nextHead = AlignSize(alignedHead + size, 256);
+      if (nextHead > alloc.size)
+         continue;
+
+      BufferRef ref = {};
+      ref.buffer = alloc.buffer;
+      ref.bindGroup = alloc.bindGroup;
+      ref.offset = alignedHead;
+      ref.size = size;
+      alloc.head = nextHead;
+      return ref;
+   }
+
+   WGPUBufferDescriptor bufferDesc = {};
+   bufferDesc.size = CommonUniformBufferSize;
+   bufferDesc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform;
+   bufferDesc.mappedAtCreation = false;
+
+   CommonUniformAlloc alloc = {};
+   alloc.frameSlot = frameSlot;
+   alloc.size = CommonUniformBufferSize;
+   alloc.buffer = wgpuDeviceCreateBuffer(smState.gpuDevice, &bufferDesc);
+
+   WGPUBindGroupEntry commonEntry = {};
+   commonEntry.binding = 0;
+   commonEntry.buffer = alloc.buffer;
+   commonEntry.offset = 0;
+   commonEntry.size = sizeof(CommonUniformStruct);
+
+   WGPUBindGroupDescriptor commonDesc = {};
+   commonDesc.label = WGPUString("CommonUniformStruct");
+   commonDesc.layout = smState.commonUniformLayout;
+   commonDesc.entryCount = 1;
+   commonDesc.entries = &commonEntry;
+   alloc.bindGroup = wgpuDeviceCreateBindGroup(smState.gpuDevice, &commonDesc);
+
+   commonUniformAllocs.push_back(alloc);
+   return allocCommonUniformData(size);
 }
 
 WGPUBindGroup SDLState::makeTerrainTextureBG(WGPUTextureView squareMatTex, WGPUTextureView heightmapTex, WGPUTextureView mapTex, WGPUTextureView lmTex, WGPUSampler samplerPixel, WGPUSampler samplerLinear)
@@ -1408,8 +1457,29 @@ WGPURenderPassDescriptor SDLState::createRenderPass(bool secondary)
    return renderPassDesc;
 }
 
-bool SDLState::loadShaderModule(const char* name, const char* code)
+bool SDLState::loadShaderModule(const char* name, const char* path, const char* fallbackCode)
 {
+   std::string shaderSource;
+   if (path != NULL)
+   {
+      std::ifstream file(path, std::ios::in | std::ios::binary);
+      if (file.is_open())
+      {
+         file.seekg(0, std::ios::end);
+         std::streamoff fileSize = file.tellg();
+         file.seekg(0, std::ios::beg);
+         if (fileSize > 0)
+         {
+            shaderSource.resize((size_t)fileSize);
+            file.read(shaderSource.data(), fileSize);
+         }
+      }
+   }
+
+   const char* code = shaderSource.empty() ? fallbackCode : shaderSource.c_str();
+   if (code == NULL)
+      return false;
+
    WGPUShaderSourceWGSL wgslDesc = {};
    wgslDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
    wgslDesc.code = WGPUString(code);
@@ -1447,6 +1517,7 @@ SDLState::BufferRef SDLState::allocBuffer(size_t size, uint32_t flags, uint16_t 
       
       SDLState::BufferRef ref;
       ref.buffer = alloc.buffer;
+      ref.bindGroup = NULL;
       ref.offset = alloc.head;
       ref.size = size;
       
@@ -1556,6 +1627,11 @@ bool GFXBeginFrame()
 
    smState.frameSlot = (smState.frameSlot + 1) % SDLState::MaxFramesInFlight;
    smState.resetBufferAllocs(smState.frameSlot);
+   for (SDLState::CommonUniformAlloc& alloc : smState.commonUniformAllocs)
+   {
+      if (alloc.frameSlot == smState.frameSlot)
+         alloc.head = 0;
+   }
    
    for (SDLState::FrameModel& model : smState.models)
    {
@@ -1801,8 +1877,44 @@ void GFXUpdateCustomTextureAligned(int32_t texID, void* texData)
       return;
    
    SDLState::TexInfo& info = smState.textures[texID];
+   if (info.texture == NULL || texData == NULL)
+      return;
    
-   // Upload texture data
+   uint32_t bytesPerPixel = 4;
+   switch (wgpuTextureGetFormat(info.texture))
+   {
+      case WGPUTextureFormat_RGBA32Float:
+         bytesPerPixel = 16;
+         break;
+      case WGPUTextureFormat_RG8Uint:
+      case WGPUTextureFormat_R16Uint:
+         bytesPerPixel = 2;
+         break;
+      case WGPUTextureFormat_RGBA8Unorm:
+      default:
+         bytesPerPixel = 4;
+         break;
+   }
+
+   const uint32_t tightBytesPerRow = info.dims[0] * bytesPerPixel;
+   const uint32_t alignedMipSize = info.bytesPerRow * info.dims[1];
+   const uint8_t* srcBytes = reinterpret_cast<const uint8_t*>(texData);
+
+   std::vector<uint8_t> uploadData(alignedMipSize, 0);
+   if (tightBytesPerRow == info.bytesPerRow)
+   {
+      memcpy(uploadData.data(), srcBytes, alignedMipSize);
+   }
+   else
+   {
+      for (uint32_t row = 0; row < info.dims[1]; row++)
+      {
+         memcpy(uploadData.data() + (row * info.bytesPerRow),
+                srcBytes + (row * tightBytesPerRow),
+                tightBytesPerRow);
+      }
+   }
+
    WGPUTexelCopyBufferLayout layout = {};
    layout.offset = 0;
    layout.bytesPerRow = info.bytesPerRow;
@@ -1815,12 +1927,9 @@ void GFXUpdateCustomTextureAligned(int32_t texID, void* texData)
    copyInfo.origin = (WGPUOrigin3D){0, 0, 0};
    copyInfo.aspect = WGPUTextureAspect_All;
    
-   
-   uint32_t alignedMipSize = info.bytesPerRow * info.dims[1];
-   
    wgpuQueueWriteTexture(smState.gpuQueue,
                          &copyInfo,
-                         texData,
+                         uploadData.data(),
                          alignedMipSize,
                          &layout,
                          &size);
@@ -2302,12 +2411,22 @@ void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset,
    const size_t vertSize = sizeof(ModelVertex) * model.numVerts;
    const size_t texVertSize = sizeof(ModelTexVertex) * model.numTexVerts;
    const size_t skinSize = sizeof(ModelSkinVertex) * model.numSkinVerts;
-   const size_t indexSize = AlignSize(sizeof(uint16_t) * model.numInds, sizeof(uint32_t));
+   const size_t indexDataSize = sizeof(uint16_t) * model.numInds;
+   const size_t indexUploadSize = AlignSize(indexDataSize, sizeof(uint32_t));
    
    if (model.inFrame == false)
    {
-      model.indexOffset = smState.allocBuffer(model.numInds * sizeof(uint16_t), WGPUBufferUsage_CopyDst | WGPUBufferUsage_Index, sizeof(uint32_t));
-      wgpuQueueWriteBuffer(smState.gpuQueue, model.indexOffset.buffer, model.indexOffset.offset, model.indexData, indexSize);
+      model.indexOffset = smState.allocBuffer(indexUploadSize, WGPUBufferUsage_CopyDst | WGPUBufferUsage_Index, sizeof(uint32_t));
+      if (indexUploadSize != indexDataSize)
+      {
+         std::vector<uint8_t> alignedIndexData(indexUploadSize, 0);
+         memcpy(alignedIndexData.data(), model.indexData, indexDataSize);
+         wgpuQueueWriteBuffer(smState.gpuQueue, model.indexOffset.buffer, model.indexOffset.offset, alignedIndexData.data(), indexUploadSize);
+      }
+      else
+      {
+         wgpuQueueWriteBuffer(smState.gpuQueue, model.indexOffset.buffer, model.indexOffset.offset, model.indexData, indexDataSize);
+      }
       
       model.vertOffset = smState.allocBuffer(vertSize, WGPUBufferUsage_CopyDst | WGPUBufferUsage_Vertex, sizeof(ModelVertex));
       wgpuQueueWriteBuffer(smState.gpuQueue, model.vertOffset.buffer, model.vertOffset.offset, model.vertData, vertSize);
@@ -2331,24 +2450,20 @@ void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset,
 
 void GFXDrawModelVerts(uint32_t numVerts, uint32_t startVerts)
 {
-   SDLState::BufferRef uniformData = smState.allocBuffer(sizeof(CommonUniformStruct), WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform, 256);
+   SDLState::BufferRef uniformData = smState.allocCommonUniformData(sizeof(CommonUniformStruct));
    wgpuQueueWriteBuffer(smState.gpuQueue, uniformData.buffer, uniformData.offset, &smState.currentProgram->uniforms, sizeof(CommonUniformStruct));
-   
-   uint32_t offsets[1];
-   offsets[0] = (uint32_t)uniformData.offset;
-   wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 0, smState.commonUniformGroup, 1, offsets);
+   uint32_t offsets[1] = {(uint32_t)uniformData.offset};
+   wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 0, uniformData.bindGroup, 1, offsets);
    
    wgpuRenderPassEncoderDraw(smState.renderEncoder, numVerts, 1, startVerts, 0);
 }
 
 void GFXDrawModelPrims(uint32_t numVerts, uint32_t numInds, uint32_t startInds, uint32_t startVerts)
 {
-   SDLState::BufferRef uniformData = smState.allocBuffer(sizeof(CommonUniformStruct), WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform, 256);
+   SDLState::BufferRef uniformData = smState.allocCommonUniformData(sizeof(CommonUniformStruct));
    wgpuQueueWriteBuffer(smState.gpuQueue, uniformData.buffer, uniformData.offset, &smState.currentProgram->uniforms, sizeof(CommonUniformStruct));
-   
-   uint32_t offsets[1];
-   offsets[0] = uniformData.offset;
-   wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 0, smState.commonUniformGroup, 1, offsets);
+   uint32_t offsets[1] = {(uint32_t)uniformData.offset};
+   wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 0, uniformData.bindGroup, 1, offsets);
    
    wgpuRenderPassEncoderDrawIndexed(smState.renderEncoder, numInds, 1, startInds, startVerts, 0);
 }
@@ -2438,15 +2553,14 @@ void GFXDrawLine(slm::vec3 start, slm::vec3 end, slm::vec4 color, float width)
    
    smState.lineProgram.uniforms.params1 = slm::vec4(1.0f / smState.viewportSize.x, 1.0f / smState.viewportSize.y, width, 0.0f);
    
-   SDLState::BufferRef uniformData = smState.allocBuffer(sizeof(CommonUniformStruct), WGPUBufferUsage_CopyDst | WGPUBufferUsage_Uniform, 256);
+   SDLState::BufferRef uniformData = smState.allocCommonUniformData(sizeof(CommonUniformStruct));
    wgpuQueueWriteBuffer(smState.gpuQueue, uniformData.buffer, uniformData.offset, &smState.lineProgram.uniforms, sizeof(CommonUniformStruct));
    
    SDLState::BufferRef lineData = smState.allocBuffer(sizeof(verts), WGPUBufferUsage_CopyDst | WGPUBufferUsage_Vertex, sizeof(_LineVert));
    wgpuQueueWriteBuffer(smState.gpuQueue, lineData.buffer, lineData.offset, verts, sizeof(verts));
    
-   uint32_t offsets[1];
-   offsets[0] = uniformData.offset;
-   wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 0, smState.commonUniformGroup, 1, offsets);
+   uint32_t offsets[1] = {(uint32_t)uniformData.offset};
+   wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 0, uniformData.bindGroup, 1, offsets);
    
    wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 0, lineData.buffer, lineData.offset, sizeof(verts));
    

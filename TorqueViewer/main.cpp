@@ -55,6 +55,7 @@ namespace fs = std::filesystem;
 
 // The max number of command buffers in flight
 static const uint32_t TVMaxBuffersInFlight = 3;
+static const slm::mat4 kTorqueZUpViewBasis = slm::rotation_x(slm::radians(-90.0f));
 
 // Run of the mill quaternion interpolator
 slm::quat CompatInterpolate( slm::quat const & q1,
@@ -467,6 +468,8 @@ public:
       int32_t mStartFrame;
       uint32_t mIflMaterial;
       float mDuration; // 1.0 / 30 * total
+
+      RuntimeIflMaterialInfo() : mFrame(0), mStartFrame(0), mIflMaterial(0), mDuration(0.0f) {;}
    };
    
    struct RuntimeDecalInfo
@@ -485,6 +488,16 @@ public:
       
       RuntimeObjectInfo() : mLastMatFrame(0), mLastMeshframe(0), mLastVis(1.0), mDraw(true) {;}
       ~RuntimeObjectInfo() {;}
+   };
+
+   struct MaterialBindingInfo
+   {
+      uint32_t materialIndex;
+      uint32_t textureGroupID;
+      uint32_t materialFrame;
+      ModelPipelineState pipelineState;
+
+      MaterialBindingInfo() : materialIndex(0), textureGroupID(0), materialFrame(0), pipelineState(ModelPipeline_DefaultDiffuse) {;}
    };
    
    struct RuntimeDetailInfo
@@ -628,7 +641,9 @@ public:
                delete[] updateMem;
             }
             
-            uint32_t transformCapacity = std::max<uint32_t>((pow2Size * pow2Size) / 3, 1);
+            // Three RGBA texels store one 4x3 matrix. Round up so the raw CPU backing
+            // always covers the full texture byte size used by the upload path.
+            uint32_t transformCapacity = std::max<uint32_t>(((pow2Size * pow2Size) + 2) / 3, 1);
             updateMem = new T[transformCapacity];
             memset(updateMem, 0, transformCapacity * sizeof(T));
             if (initialMem)
@@ -653,6 +668,14 @@ public:
             GFXUpdateCustomTextureAligned(texID, updateMem);
          }
       }
+   };
+
+   struct PackedModelData
+   {
+      std::vector<ModelVertex> verts;
+      std::vector<ModelTexVertex> texVerts;
+      std::vector<ModelSkinVertex> skinVerts;
+      std::vector<uint16_t> indices;
    };
    
    struct Matrix43
@@ -781,6 +804,15 @@ public:
       {
          mRuntimeSubShapeInfos[i].subShapeIndex = (uint32_t)i;
          mRuntimeSubShapeInfos[i].dirtyFlags = RuntimeSubShapeInfo::AllDirty;
+      }
+      for (size_t i=0; i<mRuntimeIflMaterialInfos.size(); i++)
+      {
+         RuntimeIflMaterialInfo& info = mRuntimeIflMaterialInfos[i];
+         Dts3::IflMaterial& ifl = mShape->mIflMaterials[i];
+         info.mIflMaterial = (uint32_t)i;
+         info.mStartFrame = ifl.firstFrame;
+         info.mFrame = 0;
+         info.mDuration = ifl.time * (float)ifl.numFrames;
       }
       
       // Load base skin transforms texture
@@ -1343,11 +1375,17 @@ public:
          return;
       
       memset(nodeMeshTransformsTex.updateMem, 0, nodeMeshTransformsTex.memorySize * sizeof(Matrix43));
-      nodeMeshTransformsTex.updateMem[mBaseTextureTransform] = packMatrix43(slm::mat4(1.0f));
+      if (mBaseTextureTransform < nodeMeshTransformsTex.memorySize)
+      {
+         nodeMeshTransformsTex.updateMem[mBaseTextureTransform] = packMatrix43(slm::mat4(1.0f));
+      }
       
       for (size_t i=0; i<mNodeTransforms.size(); i++)
       {
-         nodeMeshTransformsTex.updateMem[mBaseTextureTransform + 1 + i] = packMatrix43(mNodeTransforms[i]);
+         const size_t transformIndex = mBaseTextureTransform + 1 + i;
+         if (transformIndex >= nodeMeshTransformsTex.memorySize)
+            break;
+         nodeMeshTransformsTex.updateMem[transformIndex] = packMatrix43(mNodeTransforms[i]);
       }
       
       for (RuntimeMeshInfo& rm : mRuntimeMeshInfos)
@@ -1358,12 +1396,16 @@ public:
          
          for (size_t i=0; i<sd->nodeTransforms.size(); i++)
          {
+            const size_t transformIndex = rm.mMeshTransformOffset + i;
+            if (transformIndex >= nodeMeshTransformsTex.memorySize)
+               break;
+
             slm::mat4 finalTransform = sd->nodeTransforms[i];
             if (i < sd->nodeIndex.size() && sd->nodeIndex[i] < mNodeTransforms.size())
             {
                finalTransform = mNodeTransforms[sd->nodeIndex[i]] * sd->nodeTransforms[i];
             }
-            nodeMeshTransformsTex.updateMem[rm.mMeshTransformOffset + i] = packMatrix43(finalTransform);
+            nodeMeshTransformsTex.updateMem[transformIndex] = packMatrix43(finalTransform);
          }
       }
       
@@ -1538,7 +1580,7 @@ public:
       
       // NOTE: this is assuming objectStates starts with the base objects; also
       // this is just for setting the initial state (it doesn't save storage space).
-      for (uint32_t i=subShape.firstDecal; i<subShape.firstDecal + subShape.numDecals; i++)
+      for (uint32_t i=subShape.firstObject; i<subShape.firstObject + subShape.numObjects; i++)
       {
          if (checkSet.test(i))
          {
@@ -1606,7 +1648,7 @@ public:
       
       // NOTE: this is assuming objectStates starts with the base objects; also
       // this is just for setting the initial state (it doesn't save storage space).
-      for (uint32_t i=subShape.firstDecal; i<subShape.firstDecal + subShape.numDecals; i++)
+      for (uint32_t i=subShape.firstObject; i<subShape.firstObject + subShape.numObjects; i++)
       {
          if (checkSet.test(i))
          {
@@ -1664,7 +1706,7 @@ public:
       
       // NOTE: this is assuming objectStates starts with the base objects; also
       // this is just for setting the initial state (it doesn't save storage space).
-      for (uint32_t i=subShape.firstDecal; i<subShape.firstDecal + subShape.numDecals; i++)
+      for (uint32_t i=subShape.firstObject; i<subShape.firstObject + subShape.numObjects; i++)
       {
          if (checkSet.test(i))
          {
@@ -1879,24 +1921,22 @@ public:
       }
    }
    
-   void initVertexBuffer()
+   void buildPackedModelData(PackedModelData& packed)
    {
-      clearVertexBuffer();
-      
       /*
        NOTE: We put skin data first, then follow it with basic data. This is so
        we can bind the skin data without dealing with alignment issues.
        */
       
-      std::vector<ModelVertex> modelVerts;
-      std::vector<ModelTexVertex> modelTexVerts;
-      std::vector<ModelSkinVertex> packedSkinVertices;
+      packed.verts.clear();
+      packed.texVerts.clear();
+      packed.skinVerts.clear();
+      packed.indices.clear();
+
       std::vector<RuntimeMeshInfo*> skinMeshList;
       std::vector<RuntimeMeshInfo*> basicMeshList;
-      std::vector<uint16_t> modelInds;
       
       // Load meshes
-      uint32_t count = 0;
       uint32_t vertCount = 0;
       uint32_t indexCount = 0;
       uint32_t skinVertCount = 0;
@@ -1939,16 +1979,16 @@ public:
          rm.mSkinVertOffset = 0;
       }
       
-      modelVerts.resize(vertCount + skinVertCount);
-      modelTexVerts.resize(vertCount + skinVertCount);
+      packed.verts.resize(vertCount + skinVertCount);
+      packed.texVerts.resize(vertCount + skinVertCount);
       if (maxVertsInMesh != 0 || skinMeshList.size() != 0)
-         packedSkinVertices.resize(maxVertsInMesh + skinVertCount);
-      modelInds.resize(indexCount);
+         packed.skinVerts.resize(maxVertsInMesh + skinVertCount);
+      packed.indices.resize(indexCount);
 
       for (uint32_t i=0; i<maxVertsInMesh; i++)
       {
-         packedSkinVertices[i].index[0] = 0;
-         packedSkinVertices[i].weights[0] = 1.0f;
+         packed.skinVerts[i].index[0] = 0;
+         packed.skinVerts[i].weights[0] = 1.0f;
       }
       
       uint32_t skinVertBase = maxVertsInMesh;
@@ -1959,10 +1999,10 @@ public:
          Dts3::SkinData* sd = rm->mMesh->getSkinData();
          
          // Copy verts
-         Dts3::EmitModelVertices(sd, &modelVerts[skinVertCount]);
-         Dts3::EmitModelTexVertices(sd, &modelTexVerts[skinVertCount]);
-         Dts3::EmitPackedSkinVertices(sd, &packedSkinVertices[skinVertBase + skinVertCount]);
-         memcpy(&modelInds[indexCount], &sd->indices[0], sizeof(uint16_t) * sd->indices.size());
+         Dts3::EmitModelVertices(sd, &packed.verts[skinVertCount]);
+         Dts3::EmitModelTexVertices(sd, &packed.texVerts[skinVertCount]);
+         Dts3::EmitPackedSkinVertices(sd, &packed.skinVerts[skinVertBase + skinVertCount]);
+         memcpy(&packed.indices[indexCount], &sd->indices[0], sizeof(uint16_t) * sd->indices.size());
          
          // Count & offsets
          rm->mVertOffset = skinVertCount;
@@ -1978,9 +2018,9 @@ public:
          Dts3::BasicData* bd = rm->mMesh->getBasicData();
          
          // Copy verts
-         Dts3::EmitModelVertices(bd, &modelVerts[vertCount]);
-         Dts3::EmitModelTexVertices(bd, &modelTexVerts[vertCount]);
-         memcpy(&modelInds[indexCount], &bd->indices[0], sizeof(uint16_t) * bd->indices.size());
+         Dts3::EmitModelVertices(bd, &packed.verts[vertCount]);
+         Dts3::EmitModelTexVertices(bd, &packed.texVerts[vertCount]);
+         memcpy(&packed.indices[indexCount], &bd->indices[0], sizeof(uint16_t) * bd->indices.size());
          
          // Count & offsets
          rm->mVertOffset = vertCount;
@@ -1989,17 +2029,150 @@ public:
          vertCount += rm->mVertCount;
          indexCount += rm->mIndexCount;
       }
+   }
+
+   void initVertexBuffer()
+   {
+      clearVertexBuffer();
+      
+      PackedModelData packed;
+      buildPackedModelData(packed);
       
       GFXLoadModelData(0,
-                       modelVerts.empty() ? NULL : &modelVerts[0],
-                       modelTexVerts.empty() ? NULL : &modelTexVerts[0],
-                       modelInds.empty() ? NULL : &modelInds[0],
-                       packedSkinVertices.empty() ? NULL : &packedSkinVertices[0],
-                       (uint32_t)modelVerts.size(),
-                       (uint32_t)modelTexVerts.size(),
-                       (uint32_t)modelInds.size(),
-                       (uint32_t)packedSkinVertices.size());
+                       packed.verts.empty() ? NULL : &packed.verts[0],
+                       packed.texVerts.empty() ? NULL : &packed.texVerts[0],
+                       packed.indices.empty() ? NULL : &packed.indices[0],
+                       packed.skinVerts.empty() ? NULL : &packed.skinVerts[0],
+                       (uint32_t)packed.verts.size(),
+                       (uint32_t)packed.texVerts.size(),
+                       (uint32_t)packed.indices.size(),
+                       (uint32_t)packed.skinVerts.size());
       initVB = true;
+   }
+
+   bool dumpPackedModelOBJ(const char *filename)
+   {
+      if (mShape == NULL || filename == NULL)
+         return false;
+
+      PackedModelData packed;
+      buildPackedModelData(packed);
+
+      std::ofstream out(filename);
+      if (!out.is_open())
+      {
+         fprintf(stderr, "failed to open packed OBJ dump '%s'\n", filename);
+         return false;
+      }
+
+      uint32_t vertexBase = 1;
+      uint32_t texcoordBase = 1;
+      for (uint32_t meshIdx = 0; meshIdx < mRuntimeMeshInfos.size(); meshIdx++)
+      {
+         RuntimeMeshInfo& rm = mRuntimeMeshInfos[meshIdx];
+         Dts3::BasicData* basicData = rm.mMesh ? rm.mMesh->getBasicData() : NULL;
+         if (basicData == NULL || rm.mRealVertsPerFrame == 0)
+            continue;
+
+         const uint32_t frameCount = std::max<uint32_t>(rm.mMesh->mNumFrames, 1);
+         const uint32_t texFrameCount = std::max<uint32_t>(rm.mMesh->mNumMatFrames, 1);
+         const uint32_t meshTexBase = rm.mVertOffset;
+
+         for (uint32_t frameIdx = 0; frameIdx < frameCount; frameIdx++)
+         {
+            const uint32_t vertStart = rm.mVertOffset + (frameIdx * rm.mRealVertsPerFrame);
+            const uint32_t texFrameIdx = std::min<uint32_t>(frameIdx, texFrameCount - 1);
+            const uint32_t texStart = meshTexBase + (texFrameIdx * rm.mRealVertsPerFrame);
+
+            if (vertStart + rm.mRealVertsPerFrame > packed.verts.size())
+               break;
+            if (texStart + rm.mRealVertsPerFrame > packed.texVerts.size())
+               break;
+
+            std::string meshName = "packed_mesh_" + std::to_string(meshIdx) + "_frame_" + std::to_string(frameIdx);
+            out << "g " << meshName << "\n";
+            out << "o " << meshName << "\n";
+
+            for (uint32_t i = 0; i < rm.mRealVertsPerFrame; i++)
+            {
+               const slm::vec3& v = packed.verts[vertStart + i].position;
+               out << "v " << v.x << " " << v.y << " " << v.z << "\n";
+            }
+
+            for (uint32_t i = 0; i < rm.mRealVertsPerFrame; i++)
+            {
+               const slm::vec2& vt = packed.texVerts[texStart + i].texcoord;
+               out << "vt " << vt.x << " " << (1.0f - vt.y) << "\n";
+            }
+
+            for (const Dts3::Primitive& prim : basicData->primitives)
+            {
+               const uint32_t drawMode = prim.matIndex & Dts3::Primitive::TypeMask;
+               if (drawMode != Dts3::Primitive::Triangles)
+                  continue;
+
+               for (uint32_t i = 0; i + 2 < prim.numElements; i += 3)
+               {
+                  const uint32_t i0 = packed.indices[rm.mIndexOffset + prim.firstElement + i + 0];
+                  const uint32_t i1 = packed.indices[rm.mIndexOffset + prim.firstElement + i + 1];
+                  const uint32_t i2 = packed.indices[rm.mIndexOffset + prim.firstElement + i + 2];
+
+                  if (i0 >= rm.mRealVertsPerFrame || i1 >= rm.mRealVertsPerFrame || i2 >= rm.mRealVertsPerFrame)
+                     continue;
+
+                  const uint32_t v0 = vertexBase + i0;
+                  const uint32_t v1 = vertexBase + i1;
+                  const uint32_t v2 = vertexBase + i2;
+                  const uint32_t t0 = texcoordBase + i0;
+                  const uint32_t t1 = texcoordBase + i1;
+                  const uint32_t t2 = texcoordBase + i2;
+                  out << "f "
+                      << v0 << "/" << t0 << " "
+                      << v1 << "/" << t1 << " "
+                      << v2 << "/" << t2 << "\n";
+               }
+            }
+
+            out << "\n";
+            vertexBase += rm.mRealVertsPerFrame;
+            texcoordBase += rm.mRealVertsPerFrame;
+         }
+      }
+
+      return true;
+   }
+
+   bool validateMeshDrawIndices(const RuntimeMeshInfo& mi, const Dts3::BasicData* bd, const char* context) const
+   {
+      if (bd == NULL || mi.mRealVertsPerFrame == 0)
+         return true;
+
+      for (const Dts3::Primitive& prim : bd->primitives)
+      {
+         const uint32_t drawMode = prim.matIndex & Dts3::Primitive::TypeMask;
+         if (drawMode != Dts3::Primitive::Triangles)
+            continue;
+
+         if (prim.firstElement + prim.numElements > bd->indices.size())
+         {
+            fprintf(stderr, "%s: primitive index range overruns mesh index buffer (first=%u count=%u size=%zu)\n",
+                    context, prim.firstElement, prim.numElements, bd->indices.size());
+            return false;
+         }
+
+         for (uint32_t i = 0; i < prim.numElements; i++)
+         {
+            const uint32_t idx = bd->indices[prim.firstElement + i];
+            if (idx >= mi.mRealVertsPerFrame)
+            {
+               fprintf(stderr, "%s: vertex index %u out of range for vertsPerFrame=%u (prim first=%u count=%u)\n",
+                       context, idx, mi.mRealVertsPerFrame, prim.firstElement, prim.numElements);
+               return false;
+            }
+         }
+      }
+
+      return true;
    }
    
    void clearVertexBuffer()
@@ -2053,7 +2226,20 @@ public:
          return;
       
       RuntimeObjectInfo& ri = mRuntimeObjectInfos[objectIndex];
+      if (ri.mLastVis <= 0.0f || !ri.mDraw)
+         return;
       RuntimeMeshInfo& mi = mRuntimeMeshInfos[obj.firstMesh + meshNum];
+
+      if (mi.mMesh != NULL)
+      {
+         const uint32_t numMeshFrames = std::max<uint32_t>(mi.mMesh->mNumFrames, 1);
+         mi.mMeshFrame = (uint32_t)std::clamp(ri.mLastMeshframe, 0, (int32_t)numMeshFrames - 1);
+      }
+      else
+      {
+         mi.mMeshFrame = 0;
+      }
+      mi.mMeshTexFrame = 0;
       
       // Need to take different paths here
       Dts3::SkinData* sd = mi.mMesh->getSkinData();
@@ -2080,13 +2266,17 @@ public:
       {
          // Sorted meshes have an array for offsets
          // NOTE: tverts or verts change here, not both.
-         uint32_t nc = std::min<uint32_t>(mi.mMeshFrame, sort->numVerts.size());
-         uint32_t mf = std::min<uint32_t>(mi.mMeshFrame, sort->firstVerts.size());
-         uint32_t tf = std::min<uint32_t>(mi.mMeshTexFrame ? mi.mMeshTexFrame : mi.mMeshFrame, sort->firstTVerts.size());
+         if (sort->numVerts.empty() || sort->firstVerts.empty() || sort->firstTVerts.empty())
+            return;
+         
+         uint32_t nc = std::min<uint32_t>(mi.mMeshFrame, (uint32_t)sort->numVerts.size() - 1);
+         uint32_t mf = std::min<uint32_t>(mi.mMeshFrame, (uint32_t)sort->firstVerts.size() - 1);
+         uint32_t tfFrame = mi.mMeshTexFrame ? mi.mMeshTexFrame : mi.mMeshFrame;
+         uint32_t tf = std::min<uint32_t>(tfFrame, (uint32_t)sort->firstTVerts.size() - 1);
          
          // NOTE: ideally we should render in cluster order here, but
          // to keep things simple we'll just let the GPU do all the work.
-         renderMesh(mi, bd,
+         renderMesh(mi, ri, bd,
                     sort->numVerts[nc],
                     sort->firstVerts[mf],
                     sort->firstTVerts[tf],
@@ -2095,7 +2285,7 @@ public:
       else if (bd)
       {
          Dts3::SortedData* sd = mi.mMesh->getSortedData();
-         renderMesh(mi, bd,
+         renderMesh(mi, ri, bd,
                     mi.mRealVertsPerFrame,
                     (mi.mMeshFrame    * mi.mRealVertsPerFrame),
                     (mi.mMeshTexFrame * mi.mRealVertsPerFrame),
@@ -2107,7 +2297,7 @@ public:
          if (dd)
          {
             RuntimeMeshInfo& smi = mRuntimeMeshInfos[dd->meshIndex];
-            renderDecal(mi, smi, bd, dd);
+            renderDecal(mi, smi, ri, bd, dd);
          }
       }
    }
@@ -2130,35 +2320,91 @@ public:
          return ModelPipeline_DefaultDiffuse;
       }
    }
+
+   int32_t findIflMaterialSlot(uint32_t slotIndex) const
+   {
+      for (size_t i=0; i<mShape->mIflMaterials.size(); i++)
+      {
+         if (mShape->mIflMaterials[i].slot == slotIndex)
+            return (int32_t)i;
+      }
+      return -1;
+   }
+
+   MaterialBindingInfo resolveMaterialBinding(uint32_t baseMaterialIndex, const RuntimeObjectInfo& objectInfo) const
+   {
+      MaterialBindingInfo binding;
+      const uint32_t materialCount = mMaterialList ? mMaterialList->size() : 0;
+      if (materialCount == 0)
+         return binding;
+
+      uint32_t resolvedMaterialIndex = std::min(baseMaterialIndex, materialCount - 1);
+      int32_t iflIndex = findIflMaterialSlot(resolvedMaterialIndex);
+      if (iflIndex >= 0 && iflIndex < mRuntimeIflMaterialInfos.size())
+      {
+         const RuntimeIflMaterialInfo& runtimeIfl = mRuntimeIflMaterialInfos[iflIndex];
+         const Dts3::IflMaterial& ifl = mShape->mIflMaterials[iflIndex];
+         uint32_t iflFrame = (uint32_t)std::max(runtimeIfl.mFrame, 0);
+         if (ifl.numFrames > 0)
+            iflFrame = std::min<uint32_t>(iflFrame, (uint32_t)ifl.numFrames - 1);
+         const uint32_t iflMaterialIndex = ifl.firstFrame + iflFrame;
+         if (iflMaterialIndex < materialCount)
+            resolvedMaterialIndex = iflMaterialIndex;
+      }
+      else if (objectInfo.mLastMatFrame > 0)
+      {
+         const uint32_t frameMaterialIndex = resolvedMaterialIndex + (uint32_t)objectInfo.mLastMatFrame;
+         if (frameMaterialIndex < materialCount)
+            resolvedMaterialIndex = frameMaterialIndex;
+      }
+
+      binding.materialIndex = resolvedMaterialIndex;
+      binding.pipelineState = calcPipelineState(mMaterialList->operator[](resolvedMaterialIndex).tsProps.flags);
+      if (useShared)
+      {
+         binding.textureGroupID = mSharedMaterials.tex.texID;
+         binding.materialFrame = resolvedMaterialIndex;
+      }
+      else if (resolvedMaterialIndex < mActiveMaterials.size())
+      {
+         binding.textureGroupID = mActiveMaterials[resolvedMaterialIndex].texGroupID;
+      }
+
+      return binding;
+   }
    
-   void renderDecal(RuntimeMeshInfo& mi, RuntimeMeshInfo& smi, Dts3::BasicData* bd, Dts3::DecalData* dd)
+   void renderDecal(RuntimeMeshInfo& mi, RuntimeMeshInfo& smi, RuntimeObjectInfo& ri, Dts3::BasicData* bd, Dts3::DecalData* dd)
    {
       const uint32_t meshVertOffset = smi.mVertOffset + (smi.mMeshFrame * smi.mRealVertsPerFrame);
       const uint32_t meshTexOffset = smi.mVertOffset + (smi.mMeshTexFrame * smi.mRealVertsPerFrame);
       const uint32_t meshSkinOffset = smi.mSkinVertOffset + (smi.mUseSkinData ? (smi.mMeshFrame * smi.mRealVertsPerFrame) : 0);
       GFXSetModelVerts(0, meshVertOffset, meshTexOffset, smi.mIndexOffset, meshSkinOffset);
       GFXSetModelViewProjection(mModelMatrix, mViewMatrix, mProjectionMatrix, smi.mRenderFlags);
-      GFXSetTSPipelineProps(mi.mMeshTexFrame, smi.mMeshTransformOffset, dd->texGenS[mi.mMeshFrame], dd->texGenT[mi.mMeshFrame]);
       
       uint32_t start = dd->startPrimitive[mi.mMeshFrame];
       uint32_t end = mi.mMeshFrame+1 < dd->startPrimitive.size() ? dd->startPrimitive[mi.mMeshFrame+1] : dd->primitives.size();
+      bool haveBoundState = false;
+      ModelPipelineState currentPipelineState = ModelPipeline_DefaultDiffuse;
+      uint32_t currentGroupID = 0;
       
       for (uint32_t i=start; i<end; i++)
       {
          Dts3::Primitive& prim = dd->primitives[i];
          uint32_t matIndex = dd->matIndex & Dts3::Primitive::MaterialMask;
          uint32_t drawMode = prim.matIndex & Dts3::Primitive::TypeMask;
-         
-         // To keep things simple, everything is assembled into a single texture group, though
-         // this should not include env maps and whatnot.
-         const MaterialList::Material& mat = mMaterialList->operator[](matIndex);
-         ActiveMaterial& amat = mActiveMaterials[matIndex];
-         uint32_t groupID = amat.tex.texID; // TOOD
-         
-         ModelPipelineState pipelineState = calcPipelineState(mat.tsProps.flags);
-         GFXBeginTSModelPipelineState(pipelineState,
-                                      groupID,
-                                      1.1f, false, false);
+         MaterialBindingInfo binding = resolveMaterialBinding(matIndex, ri);
+         if (!haveBoundState ||
+             binding.pipelineState != currentPipelineState ||
+             binding.textureGroupID != currentGroupID)
+         {
+            GFXBeginTSModelPipelineState(binding.pipelineState,
+                                         binding.textureGroupID,
+                                         1.1f, false, false);
+            currentPipelineState = binding.pipelineState;
+            currentGroupID = binding.textureGroupID;
+            haveBoundState = true;
+         }
+         GFXSetTSPipelineProps(binding.materialFrame, smi.mMeshTransformOffset, dd->texGenS[mi.mMeshFrame], dd->texGenT[mi.mMeshFrame]);
          
          assert(drawMode == Dts3::Primitive::Triangles);
          
@@ -2169,14 +2415,16 @@ public:
       }
    }
    
-   void renderMesh(RuntimeMeshInfo& mi, Dts3::BasicData* bd, uint32_t drawVerts, uint32_t firstVert, uint32_t firstTVert, bool depthPeel=false)
+   void renderMesh(RuntimeMeshInfo& mi, RuntimeObjectInfo& ri, Dts3::BasicData* bd, uint32_t drawVerts, uint32_t firstVert, uint32_t firstTVert, bool depthPeel=false)
    {
+      if (!validateMeshDrawIndices(mi, bd, "renderMesh"))
+         return;
+
       const uint32_t meshVertOffset = mi.mVertOffset + firstVert;
       const uint32_t meshTexOffset = mi.mVertOffset + firstTVert;
       const uint32_t meshSkinOffset = mi.mSkinVertOffset + (mi.mUseSkinData ? firstVert : 0);
       GFXSetModelVerts(0, meshVertOffset, meshTexOffset, mi.mIndexOffset, meshSkinOffset);
       GFXSetModelViewProjection(mModelMatrix, mViewMatrix, mProjectionMatrix, mi.mRenderFlags);
-      GFXSetTSPipelineProps(mi.mMeshTexFrame, mi.mMeshTransformOffset, slm::vec4(0), slm::vec4(0));
       
       // NOTE: if we wanted to more optimally batch, emitting a drawcall per matIndex would make
       // more sense here.
@@ -2187,21 +2435,26 @@ public:
       
       for (uint32_t i=0; i<passes; i++)
       {
+         bool haveBoundState = false;
+         ModelPipelineState currentPipelineState = ModelPipeline_DefaultDiffuse;
+         uint32_t currentGroupID = 0;
          for (Dts3::Primitive& prim : bd->primitives)
          {
             uint32_t matIndex = prim.matIndex & Dts3::Primitive::MaterialMask;
             uint32_t drawMode = prim.matIndex & Dts3::Primitive::TypeMask;
-            
-            // To keep things simple, everything is assembled into a single texture group.
-            // IFL materials make use of the texture array feature.
-            MaterialList::Material& mat = mMaterialList->operator[](matIndex);
-            ActiveMaterial& amat = mActiveMaterials[matIndex];
-            uint32_t groupID = amat.texGroupID; // TODO
-            
-            ModelPipelineState pipelineState = calcPipelineState(mat.tsProps.flags);
-            GFXBeginTSModelPipelineState(pipelineState, 
-                                         groupID,
-                                         1.1f, depthPeel, (passes % 2) == 0);
+            MaterialBindingInfo binding = resolveMaterialBinding(matIndex, ri);
+            if (!haveBoundState ||
+                binding.pipelineState != currentPipelineState ||
+                binding.textureGroupID != currentGroupID)
+            {
+               GFXBeginTSModelPipelineState(binding.pipelineState, 
+                                            binding.textureGroupID,
+                                            1.1f, depthPeel, (passes % 2) == 0);
+               currentPipelineState = binding.pipelineState;
+               currentGroupID = binding.textureGroupID;
+               haveBoundState = true;
+            }
+            GFXSetTSPipelineProps(binding.materialFrame, mi.mMeshTransformOffset, slm::vec4(0), slm::vec4(0));
             
             assert(drawMode == Dts3::Primitive::Triangles);
             
@@ -2313,7 +2566,7 @@ public:
       mViewer.initRender();
       mWindow = window;
       xRot = mDetailDist = 0;
-      yRot = slm::radians(180.0f);
+      yRot = 0.0f;
       mShape = NULL;
       mHighlightNodeIdx = -1;
       mRemoveThreadId = -1;
@@ -2381,7 +2634,9 @@ public:
          mViewer.loadShape(*mShape);
          rebuildSequenceUI();
          
-         mViewPos = slm::vec3(0);//slm::vec3(0, mViewer.mShape->mCenter.z, mViewer.mShape->mRadius);
+         const float viewDist = std::max(mViewer.mShape->mRadius * 2.0f, 1.0f);
+         mViewPos = mViewer.mShape->mCenter + slm::vec3(0.0f, -viewDist, 0.0f);
+         mCamRot = slm::vec3(0.0f, 0.0f, 0.0f);
       }
    }
 
@@ -2499,13 +2754,18 @@ public:
 
       return true;
    }
+
+   bool dumpPackedShapeOBJ(const char *filename)
+   {
+      return mViewer.dumpPackedModelOBJ(filename);
+   }
    
    void update(float dt)
    {
-      mViewer.mModelMatrix = slm::rotation_x(xRot) * slm::rotation_y(yRot);
+      mViewer.mModelMatrix = slm::rotation_x(xRot) * slm::rotation_z(yRot);
       slm::mat4 rotMat = slm::rotation_z(slm::radians(mCamRot.z)) * slm::rotation_y(slm::radians(mCamRot.y)) *  slm::rotation_x(slm::radians(mCamRot.x));
       rotMat = inverse(rotMat);
-      mViewer.mViewMatrix = slm::mat4(1) * rotMat * slm::translation(-mViewPos);
+      mViewer.mViewMatrix = kTorqueZUpViewBasis * rotMat * slm::translation(-mViewPos);
       
       int w, h;
       SDL_GetWindowSize(mWindow, &w, &h);
@@ -2845,6 +3105,7 @@ int MainState::boot()
 {
    currentController = shapeController;
    std::string dumpObjPath;
+   std::string dumpPackedObjPath;
    
    for (int i=1; i<in_argc; i++)
    {
@@ -2857,6 +3118,16 @@ int MainState::boot()
             return 1;
          }
          dumpObjPath = in_argv[++i];
+         continue;
+      }
+      if (path && strcmp(path, "--dump-packed-obj") == 0)
+      {
+         if (i + 1 >= in_argc)
+         {
+            fprintf(stderr, "--dump-packed-obj requires an output path\n");
+            return 1;
+         }
+         dumpPackedObjPath = in_argv[++i];
          continue;
       }
       if (path && path[0] == '-')
@@ -2908,6 +3179,11 @@ int MainState::boot()
    if (!dumpObjPath.empty())
    {
       if (!shapeController->dumpLoadedShapeOBJ(dumpObjPath.c_str()))
+         return 1;
+   }
+   if (!dumpPackedObjPath.empty())
+   {
+      if (!shapeController->dumpPackedShapeOBJ(dumpPackedObjPath.c_str()))
          return 1;
    }
    
@@ -2962,7 +3238,7 @@ int MainState::loop()
    currentController->mCamRot += deltaRot * dt * 100;
    slm::mat4 rotMat = slm::rotation_z(slm::radians(currentController->mCamRot.z)) * slm::rotation_y(slm::radians(currentController->mCamRot.y)) *  slm::rotation_x(slm::radians(currentController->mCamRot.x));
    //rotMat = inverse(rotMat);
-   slm::vec4 forwardVec = rotMat * slm::vec4(deltaMovement, 1);
+   slm::vec4 forwardVec = rotMat * slm::vec4(deltaMovement, 0);
    currentController->mViewPos += forwardVec.xyz() * currentController->mViewSpeed * dt;
    
    int w, h;
@@ -3033,12 +3309,12 @@ int MainState::loop()
             {
                case SDLK_A:  deltaMovement.x = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
                case SDLK_D:  deltaMovement.x = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
-               case SDLK_Q:  deltaMovement.y = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
-               case SDLK_E:  deltaMovement.y = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
-               case SDLK_W:  deltaMovement.z = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
-               case SDLK_S:  deltaMovement.z = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
-               case SDLK_LEFT:  deltaRot.y = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
-               case SDLK_RIGHT: deltaRot.y = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
+               case SDLK_Q:  deltaMovement.z = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
+               case SDLK_E:  deltaMovement.z = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
+               case SDLK_W:  deltaMovement.y = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
+               case SDLK_S:  deltaMovement.y = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
+               case SDLK_LEFT:  deltaRot.z = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
+               case SDLK_RIGHT: deltaRot.z = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
                case SDLK_UP:  deltaRot.x = event.type == SDL_EVENT_KEY_DOWN ? 1 : 0; break;
                case SDLK_DOWN: deltaRot.x = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;
                case SDLK_F12:
