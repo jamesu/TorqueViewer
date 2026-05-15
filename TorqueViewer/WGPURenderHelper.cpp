@@ -235,6 +235,7 @@ struct SDLState
    WGPUBindGroup currentModelTransformGroup;
    int32_t currentModelTransformTexID;
    int32_t fallbackDiffuseTexID;
+   int32_t fallbackTransformTexID;
    
    LineProgramInfo lineProgram;
    ModelProgramInfo modelProgram;
@@ -960,6 +961,7 @@ SDLState::SDLState()
    currentModelTransformGroup = NULL;
    currentModelTransformTexID = -1;
    fallbackDiffuseTexID = -1;
+   fallbackTransformTexID = -1;
    
    projectionMatrix = slm::mat4(1);
    modelMatrix = slm::mat4(1);
@@ -1267,10 +1269,6 @@ void SDLState::resetWGPUState()
       if (alloc.buffer)
          wgpuBufferRelease(alloc.buffer);
    }
-   if (currentModelTransformGroup)
-   {
-      wgpuBindGroupRelease(currentModelTransformGroup);
-   }
    
    for (auto& itr : shaders)
    {
@@ -1305,6 +1303,7 @@ void SDLState::resetWGPUState()
    currentModelTransformGroup = NULL;
    currentModelTransformTexID = -1;
    fallbackDiffuseTexID = -1;
+   fallbackTransformTexID = -1;
 }
 
 WGPUBindGroup SDLState::makeSimpleTextureBG(WGPUTextureView tex, WGPUSampler sampler)
@@ -1415,8 +1414,41 @@ static int32_t ensureFallbackDiffuseTexture()
    return smState.fallbackDiffuseTexID;
 }
 
+static int32_t ensureFallbackTransformTexture()
+{
+   if (smState.fallbackTransformTexID >= 0 &&
+       smState.fallbackTransformTexID < smState.textures.size() &&
+       smState.textures[smState.fallbackTransformTexID].texture != NULL &&
+       smState.textures[smState.fallbackTransformTexID].textureView != NULL &&
+       smState.textures[smState.fallbackTransformTexID].texBindGroup != NULL)
+   {
+      return smState.fallbackTransformTexID;
+   }
+
+   static const float identityRows[12] = {
+      1.0f, 0.0f, 0.0f, 0.0f,
+      0.0f, 1.0f, 0.0f, 0.0f,
+      0.0f, 0.0f, 1.0f, 0.0f
+   };
+
+   int32_t texID = GFXLoadCustomTexture(CustomTexture_Float, 1, 3, (void*)identityRows);
+   if (texID < 0 || texID >= smState.textures.size())
+      return -1;
+
+   SDLState::TexInfo& info = smState.textures[texID];
+   if (info.texture == NULL || info.textureView == NULL)
+      return -1;
+
+   info.texBindGroup = smState.makeModelTransformBG(info.textureView);
+   smState.fallbackTransformTexID = texID;
+   return texID;
+}
+
 WGPUBindGroup SDLState::makeModelTransformBG(WGPUTextureView tex)
 {
+   if (gpuDevice == NULL || modelTransformLayout == NULL || tex == NULL)
+      return NULL;
+   
    WGPUBindGroupEntry bindGroupEntry = {};
    bindGroupEntry.binding = 0;
    bindGroupEntry.textureView = tex;
@@ -2265,11 +2297,7 @@ void GFXDeleteTexture(int32_t texID)
    
    if (smState.currentModelTransformTexID == texID)
    {
-      if (smState.currentModelTransformGroup)
-      {
-         wgpuBindGroupRelease(smState.currentModelTransformGroup);
-         smState.currentModelTransformGroup = NULL;
-      }
+      smState.currentModelTransformGroup = NULL;
       smState.currentModelTransformTexID = -1;
    }
    
@@ -2408,22 +2436,29 @@ void GFXSetModelTransformTexture(int32_t texID)
 {
    if (smState.currentModelTransformTexID == texID && smState.currentModelTransformGroup != NULL)
       return;
-   
-   if (smState.currentModelTransformGroup)
-   {
-      wgpuBindGroupRelease(smState.currentModelTransformGroup);
-      smState.currentModelTransformGroup = NULL;
-   }
-   
+
    smState.currentModelTransformTexID = texID;
    if (texID < 0 || texID >= smState.textures.size())
-      return;
+   {
+      texID = ensureFallbackTransformTexture();
+      if (texID < 0 || texID >= smState.textures.size())
+         return;
+      smState.currentModelTransformTexID = texID;
+   }
    
    SDLState::TexInfo& info = smState.textures[texID];
    if (info.textureView == NULL)
-      return;
+   {
+      texID = ensureFallbackTransformTexture();
+      if (texID < 0 || texID >= smState.textures.size())
+         return;
+      smState.currentModelTransformTexID = texID;
+   }
+   SDLState::TexInfo& resolvedInfo = smState.textures[smState.currentModelTransformTexID];
    
-   smState.currentModelTransformGroup = smState.makeModelTransformBG(info.textureView);
+   if (resolvedInfo.texBindGroup == NULL)
+      resolvedInfo.texBindGroup = smState.makeModelTransformBG(resolvedInfo.textureView);
+   smState.currentModelTransformGroup = resolvedInfo.texBindGroup;
 }
 
 void GFXSetTSMaterialResources(uint32_t tsGroupID, int32_t diffuseTexID, int32_t emapAlphaTexID, int32_t emapTexID, int32_t dmapID)
@@ -2468,10 +2503,12 @@ void GFXBeginTSModelPipelineState(ModelPipelineState state, uint32_t tsGroupID, 
    }
 
    GFXSetTSMaterialResources(tsGroupID, -1, -1, -1, -1);
+   if (smState.currentModelTransformGroup == NULL)
+      GFXSetModelTransformTexture(smState.currentModelTransformTexID);
+   if (smState.currentModelTransformGroup == NULL)
+      GFXSetModelTransformTexture(ensureFallbackTransformTexture());
    if (smState.currentModelTransformGroup)
-   {
       wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 2, smState.currentModelTransformGroup, 0, NULL);
-   }
 }
 
 void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID, float testVal, bool depthPeel, bool swapDepth)
