@@ -1142,7 +1142,7 @@ public:
    void initRender()
    {
       mLightColor = slm::vec4(1,1,1,1);
-      mLightPos = slm::vec3(0,2, 2);
+      mLightPos = slm::vec3(0,-2, 2);
       if (mShape == NULL)
          return;
       
@@ -1833,6 +1833,22 @@ public:
       
       GFXUpdateCustomTextureAligned(nodeMeshTransformsTex.texID, nodeMeshTransformsTex.updateMem);
       GFXSetModelTransformTexture(nodeMeshTransformsTex.texID);
+   }
+
+   void refreshRenderStateAfterSequenceImport()
+   {
+      if (!mShape)
+         return;
+
+      updateScaleAnimatonState();
+      setDirty(RuntimeSubShapeInfo::AllDirty);
+      if (!mShape->mDetailLevels.empty() &&
+          mCurrentDetail >= 0 &&
+          mCurrentDetail < (int32_t)mShape->mDetailLevels.size())
+      {
+         animate(mShape->mDetailLevels[mCurrentDetail]);
+      }
+      updateTransformTexture();
    }
 
    int32_t getNodeMatterIndex(const IntegerSet& matterSet, int32_t nodeIdx) const
@@ -2972,7 +2988,6 @@ public:
       }
       else if (bd)
       {
-         Dts3::SortedData* sd = mi.mMesh->getSortedData();
          renderMesh(mi, ri, bd,
                     mi.mRealVertsPerFrame,
                     (mi.mMeshFrame    * mi.mRealVertsPerFrame),
@@ -3329,7 +3344,7 @@ public:
       mViewer.initRender();
       mWindow = window;
       xRot = mDetailDist = 0;
-      yRot = 0.0f;
+      yRot = 3.14159;
       mShape = NULL;
       mHighlightNodeIdx = -1;
       mSelectedMaterialIdx = 0;
@@ -3430,8 +3445,7 @@ public:
          return false;
       }
 
-      mViewer.clear();
-      mViewer.loadShape(*mShape);
+      mViewer.refreshRenderStateAfterSequenceImport();
       mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
       mSelectedMaterialIdx = 0;
       mSelectedObjectIdx = 0;
@@ -3979,7 +3993,7 @@ public:
       }
       if (ImGui::Button("Reset Light"))
       {
-         mViewer.mLightPos = slm::vec3(0, 2, 2);
+         mViewer.mLightPos = slm::vec3(0, -2, 2);
          mViewer.mLightColor = slm::vec4(1, 1, 1, 1);
       }
       ImGui::Checkbox("Render Nodes", &mRenderNodes);

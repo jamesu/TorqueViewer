@@ -420,6 +420,7 @@ struct IO
       {
          return false;
       }
+      const int32_t objectStateBaseShift = (int32_t)shape->mObjectStates.size() - objectStateCount;
       
       const int32_t triggerBase = (int32_t)shape->mTriggers.size();
       const int32_t groundBase = (int32_t)shape->mGroundTranslations.size();
@@ -501,6 +502,7 @@ struct IO
          seq.mattersRot = newMattersRot;
          seq.mattersTranslation = newMattersTranslation;
          seq.mattersScale = newMattersScale;
+         seq.baseObjectState += objectStateBaseShift;
          seq.firstTrigger += triggerBase;
 
          if (fileVersion > 21)
