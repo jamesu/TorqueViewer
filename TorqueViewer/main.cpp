@@ -1946,7 +1946,7 @@ public:
 
       Dts3::ArbitraryScale scaleA = mShape->getSequenceArbitraryScale(sequence, keyInfo.keyA, scaleIndex);
       Dts3::ArbitraryScale scaleB = mShape->getSequenceArbitraryScale(sequence, keyInfo.keyB, scaleIndex);
-      outScale.rot = scaleA.rot;
+      outScale.rot = CompatInterpolate(scaleA.rot, scaleB.rot, keyInfo.keyPos);
       outScale.pos = slm::mix(scaleA.pos, scaleB.pos, keyInfo.keyPos);
       return true;
    }
@@ -1954,7 +1954,7 @@ public:
    slm::mat4 buildArbitraryScaleMatrix(const Dts3::ArbitraryScale& scale) const
    {
       slm::mat4 scaleRot(1.0f);
-      CompatQuatSetMatrix(scale.rot.toQuat(), scaleRot);
+      CompatQuatSetMatrix(scale.rot, scaleRot);
       return scaleRot * slm::scaling(scale.pos) * inverse(scaleRot);
    }
 
@@ -1989,7 +1989,7 @@ public:
          mActiveTranslations[nodeIdx] = slm::vec4(mShape->getDefaultNodeTranslation((int32_t)nodeIdx), 1.0f);
          mActiveAlignedScales[nodeIdx] = mShape->getDefaultNodeScale((int32_t)nodeIdx);
          mActiveUniformScales[nodeIdx] = 1.0f;
-         mActiveArbitraryScales[nodeIdx].rot = Quat16();
+         mActiveArbitraryScales[nodeIdx].rot = slm::quat(0.0f, 0.0f, 0.0f, 1.0f);
          mActiveArbitraryScales[nodeIdx].pos = slm::vec3(1.0f);
       }
 
@@ -2315,15 +2315,15 @@ public:
                   Dts3::ArbitraryScale newScale;
                   if (!sampleSequenceArbitraryScaleForNode(oldSequence, oldKeyInfo, nodeIdx, oldScale))
                   {
-                     oldScale.rot = Quat16();
+                     oldScale.rot = slm::quat(0.0f, 0.0f, 0.0f, 1.0f);
                      oldScale.pos = slm::vec3(1.0f);
                   }
                   if (!sampleSequenceArbitraryScaleForNode(newSequence, thread.keyInfo, nodeIdx, newScale))
                   {
-                     newScale.rot = Quat16();
+                     newScale.rot = slm::quat(0.0f, 0.0f, 0.0f, 1.0f);
                      newScale.pos = slm::vec3(1.0f);
                   }
-                  mActiveArbitraryScales[nodeIdx].rot = oldScale.rot;
+                  mActiveArbitraryScales[nodeIdx].rot = CompatInterpolate(oldScale.rot, newScale.rot, t);
                   mActiveArbitraryScales[nodeIdx].pos = slm::mix(oldScale.pos, newScale.pos, t);
                }
                else

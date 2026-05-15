@@ -596,6 +596,25 @@ struct IO
       int32_t firstDecalState = 0;
    };
 
+   template<typename T> static bool readLegacyNode(T& stream, Node& node, uint32_t version)
+   {
+      if (!stream.read(node.name) ||
+          !stream.read(node.parent))
+         return false;
+
+      // pre-v17 nodes carried an obsolete bool here; the old reader consumed it
+      // and then expanded the runtime fields in the backing node record.
+      if (version < 17)
+      {
+         bool obsolete = false;
+         if (!stream.read(obsolete))
+            return false;
+      }
+
+      node.resetRuntime();
+      return true;
+   }
+
    template<typename T> static void transposeLegacyTrackBlock(std::vector<T>& data, size_t start, size_t numKeyFrames, size_t numTracks)
    {
       if (start >= data.size() || numKeyFrames == 0 || numTracks == 0)
@@ -987,11 +1006,12 @@ struct IO
 
       if (!shape)
          return false;
-
-      uint32_t hdr[4] = {};
-      if (!stream.read(sizeof(hdr), hdr))
+      
+      uint32_t in_version = 0;
+      if (!stream.read(in_version))
          return false;
-      if ((hdr[0] & 0xFF) != version)
+
+      if ((version & 0xFF) != version)
          return false;
 
       shape->mRuntimeFlags = 0;
@@ -1020,33 +1040,22 @@ struct IO
           !readBox(stream, shape->mBounds))
          return false;
 
-      if (!stream.read(numNodes) ||
-          !stream.read(numObjects) ||
-          !stream.read(numDecals) ||
-          !stream.read(numSubShapes) ||
-          !stream.read(numIflMaterials))
-         return false;
-
       // Nodes: on-disk legacy layout is name + parent, with an obsolete bool
       // member present before v17.
+      if (!stream.read(numNodes))
+         return false;
       shape->mNodes.resize(numNodes);
       for (uint32_t i = 0; i < numNodes; ++i)
       {
          Node& node = shape->mNodes[i];
-         if (!stream.read(node.name) ||
-             !stream.read(node.parent))
+         if (!readLegacyNode(stream, node, version))
             return false;
-         if (version < 17)
-         {
-            bool obsolete = false;
-            if (!stream.read(obsolete))
-               return false;
-         }
-         node.resetRuntime();
       }
 
       // Objects: name, numMeshes, firstMesh, node, with runtime fields added
       // after load.
+      if (!stream.read(numObjects))
+         return false;
       shape->mObjects.resize(numObjects);
       for (uint32_t i = 0; i < numObjects; ++i)
       {
@@ -1061,6 +1070,8 @@ struct IO
       }
 
       // Decals: name, numMeshes, firstMesh, object, plus runtime sibling info.
+      if (!stream.read(numDecals))
+         return false;
       shape->mDecals.resize(numDecals);
       for (uint32_t i = 0; i < numDecals; ++i)
       {
@@ -1074,6 +1085,8 @@ struct IO
       }
 
       // IFL materials: legacy files store only name + slot.
+      if (!stream.read(numIflMaterials))
+         return false;
       shape->mIflMaterials.resize(numIflMaterials);
       for (uint32_t i = 0; i < numIflMaterials; ++i)
       {
@@ -1087,6 +1100,8 @@ struct IO
       }
 
       // Subshapes.
+      if (!stream.read(numSubShapes))
+         return false;
       shape->mSubshapes.resize(numSubShapes);
       for (SubShape& subShape : shape->mSubshapes)
       {
@@ -1248,7 +1263,7 @@ struct IO
 
       if (!stream.read(numMeshes))
          return false;
-      shape->mMeshes.resize((size_t)numMeshes + numSkins);
+      shape->mMeshes.resize(numMeshes);
       for (uint32_t i = 0; i < numMeshes; ++i)
       {
          Mesh& mesh = shape->mMeshes[i];
@@ -1287,6 +1302,7 @@ struct IO
       // Skin tail + detail-to-skin remap.
       if (!stream.read(numSkins))
          return false;
+      shape->mMeshes.resize((size_t)numMeshes + numSkins);
       for (uint32_t i = 0; i < numSkins; ++i)
       {
          Mesh& mesh = shape->mMeshes[numMeshes + i];

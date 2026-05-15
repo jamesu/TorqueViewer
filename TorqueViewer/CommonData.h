@@ -187,6 +187,21 @@ public:
       
       return true;
    }
+
+   inline bool read32(std::size_t size, void* data)
+   {
+      return read((uint64_t)size * sizeof(uint32_t), data);
+   }
+
+   inline bool read16(std::size_t size, void* data)
+   {
+      return read((uint64_t)size * sizeof(uint16_t), data);
+   }
+
+   inline bool read8(std::size_t size, void* data)
+   {
+      return read((uint64_t)size, data);
+   }
    
    inline bool readS8String(std::string &outS)
    {

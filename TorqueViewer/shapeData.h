@@ -934,7 +934,7 @@ public:
 
 struct ArbitraryScale
 {
-   Quat16 rot;
+   slm::quat rot;
    slm::vec3 pos;
 };
 
@@ -1082,7 +1082,7 @@ public:
       struct ArbitraryScale outScale;
       const int32_t realFrame = sequence.baseScale + (sequence.numKeyFrames * scaleIndex) + frame;
       outScale.pos = mNodeArbitraryScaleFactors[realFrame];
-      outScale.rot = mNodeArbitraryScaleRotations[realFrame];
+      outScale.rot = mNodeArbitraryScaleRotations[realFrame].toQuat();
       return outScale;
    }
    
