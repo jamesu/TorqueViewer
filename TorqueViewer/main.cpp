@@ -844,6 +844,7 @@ public:
    std::vector<int32_t> mNodeRotationThreads;
    std::vector<int32_t> mNodeTranslationThreads;
    std::vector<int32_t> mNodeScaleThreads;
+   IntegerSet mHandsOffNodes;
    
    int32_t mDefaultMaterials;
    int32_t mAlwaysNode;
@@ -1002,6 +1003,7 @@ public:
       mActiveUniformScales.clear();
       mActiveAlignedScales.clear();
       mActiveArbitraryScales.clear();
+      mHandsOffNodes.reset();
       mGroundThreadIdx = -1;
       mCurrentDetail = -1;
       mTriggerStateFlags = 0;
@@ -1958,6 +1960,12 @@ public:
             continue;
          }
 
+         if (mHandsOffNodes.test((size_t)nodeIdx))
+         {
+            rotFrame++;
+            continue;
+         }
+
          if (!rotationSet[nodeIdx])
          {
             slm::quat rotA = mShape->getSequenceRotation(sequence, thread.keyInfo.keyA, rotFrame).toQuat();
@@ -1980,6 +1988,12 @@ public:
             continue;
          }
 
+         if (mHandsOffNodes.test((size_t)nodeIdx))
+         {
+            transFrame++;
+            continue;
+         }
+
          if (!translationSet[nodeIdx])
          {
             slm::vec3 transA = mShape->getSequenceTranslation(sequence, thread.keyInfo.keyA, transFrame);
@@ -1997,6 +2011,12 @@ public:
            nodeIdx = (int32_t)sequence.mattersScale.findNext(nodeIdx))
       {
          if (nodeIdx < firstNode || nodeIdx >= endNode)
+         {
+            scaleFrame++;
+            continue;
+         }
+
+         if (mHandsOffNodes.test((size_t)nodeIdx))
          {
             scaleFrame++;
             continue;
@@ -2042,6 +2062,9 @@ public:
       const int32_t endNode = std::min<int32_t>(subShape.firstNode + subShape.numNodes, (int32_t)mShape->mNodes.size());
       for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
       {
+         if (mHandsOffNodes.test((size_t)nodeIdx))
+            continue;
+
          slm::mat4 localTransform;
          CompatQuatSetMatrix(mActiveRotations[nodeIdx], localTransform);
          localTransform[3] = mActiveTranslations[nodeIdx];
@@ -2132,6 +2155,9 @@ public:
 
       for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
       {
+         if (mHandsOffNodes.test((size_t)nodeIdx))
+            continue;
+
          slm::mat4 blendMat(1.0f);
          bool hasBlend = false;
 
@@ -2186,6 +2212,9 @@ public:
 
          for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
          {
+            if (mHandsOffNodes.test((size_t)nodeIdx))
+               continue;
+
             const bool affectsRot = thread.transitionState.oldRotations.test(nodeIdx) || newSequence.mattersRot.test(nodeIdx);
             if (affectsRot)
             {
@@ -4066,12 +4095,20 @@ public:
 
       bool hasChildren = mShape->mNodes[nodeIdx].firstChild >= 0;
       bool hasObjects = mShape->mNodes[nodeIdx].firstObject >= 0;
+      bool handsOff = mViewer.mHandsOffNodes.test((size_t)nodeIdx);
+      ImGui::PushID(nodeIdx);
       bool vis = ImGui::TreeNodeEx(
          mShape->getName(mShape->mNodes[nodeIdx].name),
          (hasChildren || hasObjects) ? baseFlags : (baseFlags | ImGuiTreeNodeFlags_Leaf));
       if (ImGui::IsItemClicked())
       {
          mHighlightNodeIdx = nodeIdx;
+      }
+      ImGui::SameLine();
+      if (ImGui::Checkbox("Hands Off", &handsOff))
+      {
+         mViewer.mHandsOffNodes.set((size_t)nodeIdx, handsOff);
+         mViewer.setDirty(ShapeViewer::RuntimeSubShapeInfo::AllDirty);
       }
       
       if (vis)
@@ -4096,6 +4133,7 @@ public:
       {
          ImGui::PopStyleVar(1);
       }
+      ImGui::PopID();
    }
    
 };
