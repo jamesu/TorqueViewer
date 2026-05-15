@@ -114,7 +114,14 @@ fn mainVert(input: VertexInput) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = commonUniforms.projMat * commonUniforms.viewMat * worldPos;
-    output.vTexCoord0 = input.aTexCoord0;
+    if (commonUniforms.params2.y > 0.5) {
+        let p = vec4<f32>(skinnedPos, 1.0);
+        let texgenS = commonUniforms.squareTexCoords[0];
+        let texgenT = commonUniforms.squareTexCoords[1];
+        output.vTexCoord0 = vec2<f32>(dot(texgenS, p), dot(texgenT, p));
+    } else {
+        output.vTexCoord0 = input.aTexCoord0;
+    }
     output.vLighting = vec3<f32>(0.2) + (commonUniforms.lightColor.rgb * ndotl);
     return output;
 }

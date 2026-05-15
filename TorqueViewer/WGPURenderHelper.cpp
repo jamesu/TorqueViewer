@@ -2503,6 +2503,8 @@ void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec
    smState.modelProgram.uniforms.params1.y = 1.0f;
    smState.modelProgram.uniforms.params1.z = 1.0f;
    smState.modelProgram.uniforms.params1.w = (float)matFrame;
+   smState.modelProgram.uniforms.params2.y =
+      (slm::length(texGenS) > 0.0f || slm::length(texGenT) > 0.0f) ? 1.0f : 0.0f;
    smState.modelProgram.uniforms.squareTexCoords[0] = texGenS;
    smState.modelProgram.uniforms.squareTexCoords[1] = texGenT;
    

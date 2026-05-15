@@ -2246,6 +2246,8 @@ public:
                   
                   checkSet.set(oi, true);
                }
+
+               objFrame++;
             }
          }
       });
@@ -2304,6 +2306,8 @@ public:
                   mRuntimeObjectInfos[oi].mLastMeshframe = meshFrame;
                   checkSet.set(oi, true);
                }
+
+               objFrame++;
             }
          }
       });
@@ -2362,6 +2366,8 @@ public:
                   mRuntimeObjectInfos[oi].mLastMatFrame = matFrame;
                   checkSet.set(oi, true);
                }
+
+               objFrame++;
             }
          }
       });
@@ -2885,12 +2891,13 @@ public:
       {
          const uint32_t numMeshFrames = std::max<uint32_t>(mi.mMesh->mNumFrames, 1);
          mi.mMeshFrame = (uint32_t)std::clamp(ri.mLastMeshframe, 0, (int32_t)numMeshFrames - 1);
+         mi.mMeshTexFrame = mi.mMeshFrame;
       }
       else
       {
          mi.mMeshFrame = 0;
+         mi.mMeshTexFrame = 0;
       }
-      mi.mMeshTexFrame = 0;
       
       // Need to take different paths here
       Dts3::SkinData* sd = mi.mMesh->getSkinData();
@@ -3026,6 +3033,13 @@ public:
    
    void renderDecal(RuntimeMeshInfo& mi, RuntimeMeshInfo& smi, RuntimeObjectInfo& ri, Dts3::BasicData* bd, Dts3::DecalData* dd)
    {
+      if (!dd || dd->startPrimitive.empty() || dd->texGenS.empty() || dd->texGenT.empty())
+         return;
+      if (mi.mMeshFrame >= dd->startPrimitive.size() ||
+          mi.mMeshFrame >= dd->texGenS.size() ||
+          mi.mMeshFrame >= dd->texGenT.size())
+         return;
+
       const uint32_t meshVertOffset = smi.mVertOffset + (smi.mMeshFrame * smi.mRealVertsPerFrame);
       const uint32_t meshTexOffset = smi.mVertOffset + (smi.mMeshTexFrame * smi.mRealVertsPerFrame);
       const uint32_t meshSkinOffset = smi.mSkinVertOffset + (smi.mUseSkinData ? (smi.mMeshFrame * smi.mRealVertsPerFrame) : 0);
@@ -3189,6 +3203,7 @@ public:
    Dts3::Shape* mShape;
    int32_t mHighlightNodeIdx;
    int32_t mSelectedMaterialIdx;
+   int32_t mSelectedObjectIdx;
    
    std::vector<const char*> mSequenceList;
    std::vector<int> mNextSequence;
@@ -3209,6 +3224,7 @@ public:
       mShape = NULL;
       mHighlightNodeIdx = -1;
       mSelectedMaterialIdx = 0;
+      mSelectedObjectIdx = 0;
       mRemoveThreadId = -1;
       mRenderNodes = true;
       mManualThreads = false;
@@ -3274,6 +3290,7 @@ public:
          mViewer.loadShape(*mShape);
          mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
          mSelectedMaterialIdx = 0;
+         mSelectedObjectIdx = 0;
          rebuildSequenceUI();
          
          const float viewDist = std::max(mViewer.mShape->mRadius * 2.0f, 1.0f);
@@ -3307,8 +3324,204 @@ public:
       mViewer.loadShape(*mShape);
       mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
       mSelectedMaterialIdx = 0;
+      mSelectedObjectIdx = 0;
       rebuildSequenceUI();
       return true;
+   }
+
+   bool isObjectInCurrentDetail(int32_t objectIdx) const
+   {
+      if (!mShape || mViewer.mCurrentDetail < 0 || mViewer.mCurrentDetail >= (int32_t)mShape->mDetailLevels.size())
+         return false;
+
+      const Dts3::DetailLevel& detail = mShape->mDetailLevels[mViewer.mCurrentDetail];
+      if (detail.subshape < 0 || detail.subshape >= (int32_t)mShape->mSubshapes.size())
+         return false;
+
+      const Dts3::SubShape& subShape = mShape->mSubshapes[detail.subshape];
+      return objectIdx >= subShape.firstObject &&
+             objectIdx < (subShape.firstObject + subShape.numObjects);
+   }
+
+   int32_t getRenderedMeshIndexForObject(int32_t objectIdx) const
+   {
+      if (!mShape || objectIdx < 0 || objectIdx >= (int32_t)mShape->mObjects.size())
+         return -1;
+      if (mViewer.mCurrentDetail < 0 || mViewer.mCurrentDetail >= (int32_t)mShape->mDetailLevels.size())
+         return -1;
+
+      const Dts3::Object& object = mShape->mObjects[objectIdx];
+      if (object.numMeshes <= 0)
+         return -1;
+
+      const Dts3::DetailLevel& detail = mShape->mDetailLevels[mViewer.mCurrentDetail];
+      const int32_t relativeMesh = std::clamp(detail.objectDetail, 0, object.numMeshes - 1);
+      return object.firstMesh + relativeMesh;
+   }
+
+   int32_t getRenderedMeshSlotForObject(int32_t objectIdx) const
+   {
+      if (!mShape || objectIdx < 0 || objectIdx >= (int32_t)mShape->mObjects.size())
+         return -1;
+      if (mViewer.mCurrentDetail < 0 || mViewer.mCurrentDetail >= (int32_t)mShape->mDetailLevels.size())
+         return -1;
+
+      const Dts3::Object& object = mShape->mObjects[objectIdx];
+      if (object.numMeshes <= 0)
+         return -1;
+
+      const Dts3::DetailLevel& detail = mShape->mDetailLevels[mViewer.mCurrentDetail];
+      return std::clamp(detail.objectDetail, 0, object.numMeshes - 1);
+   }
+
+   const char* getMeshTypeName(const Dts3::Mesh* mesh) const
+   {
+      if (!mesh)
+         return "null";
+      switch (mesh->mType)
+      {
+         case Dts3::Mesh::T_Standard: return "standard";
+         case Dts3::Mesh::T_Skin: return "skin";
+         case Dts3::Mesh::T_Decal: return "decal";
+         case Dts3::Mesh::T_Sorted: return "sorted";
+         case Dts3::Mesh::T_Null: return "null";
+         default: return "unknown";
+      }
+   }
+
+   std::string collectObjectThreadRefs(int32_t objectIdx) const
+   {
+      if (!mShape)
+         return "-";
+
+      std::string out;
+      auto appendThread = [&](const char* tag, int32_t threadIdx)
+      {
+         if (threadIdx < 0)
+            return;
+         if (!out.empty())
+            out += " ";
+         out += tag;
+         out += ":";
+         out += std::to_string(threadIdx);
+      };
+
+      for (size_t i = 0; i < mViewer.mThreads.size(); ++i)
+      {
+         const Dts3::Thread& thread = mViewer.mThreads[i];
+         if (thread.sequenceIdx < 0 || thread.sequenceIdx >= (int32_t)mShape->mSequences.size())
+            continue;
+
+         const Dts3::Sequence& seq = mShape->mSequences[thread.sequenceIdx];
+         if (seq.mattersVis.test(objectIdx))
+            appendThread("vis", (int32_t)i);
+         if (seq.mattersFrame.test(objectIdx))
+            appendThread("mesh", (int32_t)i);
+         if (seq.mattersMatframe.test(objectIdx))
+            appendThread("mat", (int32_t)i);
+      }
+
+      return out.empty() ? "-" : out;
+   }
+
+   void renderObjectDebugWindow()
+   {
+      ImGui::Begin("Objects");
+
+      if (mShape == NULL)
+      {
+         ImGui::TextUnformatted("No shape loaded.");
+         ImGui::End();
+         return;
+      }
+
+      const int objectCount = (int)mShape->mObjects.size();
+      if (objectCount <= 0)
+      {
+         ImGui::TextUnformatted("No objects.");
+         ImGui::End();
+         return;
+      }
+
+      mSelectedObjectIdx = std::clamp(mSelectedObjectIdx, 0, objectCount - 1);
+
+      ImGui::Columns(2, "objects_columns", true);
+      if (ImGui::BeginListBox("##object_list", ImVec2(-FLT_MIN, 320.0f)))
+      {
+         for (int i = 0; i < objectCount; ++i)
+         {
+            const Dts3::Object& object = mShape->mObjects[i];
+            const bool activeDetail = isObjectInCurrentDetail(i);
+            const bool visibleNow = i < (int)mViewer.mRuntimeObjectInfos.size() && mViewer.mRuntimeObjectInfos[i].mLastVis > 0.0f;
+            const char* objectName = mShape->getName(object.name);
+            char entryLabel[1024];
+            snprintf(entryLabel, sizeof(entryLabel), "%s%s %s##obj_%d",
+                     activeDetail ? "[A]" : "[ ]",
+                     visibleNow ? "[V]" : "[ ]",
+                     objectName ? objectName : "<unnamed>",
+                     i);
+            const bool selected = i == mSelectedObjectIdx;
+            if (ImGui::Selectable(entryLabel, selected))
+               mSelectedObjectIdx = i;
+            if (ImGui::IsItemFocused())
+               mSelectedObjectIdx = i;
+            if (selected)
+               ImGui::SetItemDefaultFocus();
+         }
+         ImGui::EndListBox();
+      }
+
+      ImGui::NextColumn();
+
+      const Dts3::Object& object = mShape->mObjects[mSelectedObjectIdx];
+      const ShapeViewer::RuntimeObjectInfo* runtimeObject =
+         mSelectedObjectIdx < (int)mViewer.mRuntimeObjectInfos.size() ? &mViewer.mRuntimeObjectInfos[mSelectedObjectIdx] : NULL;
+      const int32_t renderMeshSlot = getRenderedMeshSlotForObject(mSelectedObjectIdx);
+      const int32_t renderMeshIndex = getRenderedMeshIndexForObject(mSelectedObjectIdx);
+      const Dts3::Mesh* renderMesh =
+         (renderMeshIndex >= 0 && renderMeshIndex < (int32_t)mShape->mMeshes.size()) ? &mShape->mMeshes[renderMeshIndex] : NULL;
+
+      ImGui::Text("Index: %d", mSelectedObjectIdx);
+      ImGui::TextWrapped("Name: %s", mShape->getName(object.name) ? mShape->getName(object.name) : "<unnamed>");
+      ImGui::Separator();
+      ImGui::Text("Active Detail: %s", isObjectInCurrentDetail(mSelectedObjectIdx) ? "yes" : "no");
+      if (runtimeObject)
+         ImGui::Text("Visible Now: %s", (runtimeObject->mLastVis > 0.0f && runtimeObject->mDraw) ? "yes" : "no");
+      ImGui::Text("Node: %d  FirstMesh: %d  NumMeshes: %d", object.node, object.firstMesh, object.numMeshes);
+      ImGui::Text("NextSibling: %d  FirstDecal: %d", object.nextSibling, object.firstDecal);
+      ImGui::Separator();
+      if (runtimeObject)
+      {
+         ImGui::Text("Vis: %.3f", runtimeObject->mLastVis);
+         ImGui::Text("MeshFrame: %d  MatFrame: %d", runtimeObject->mLastMeshframe, runtimeObject->mLastMatFrame);
+         ImGui::Text("Draw Flag: %s", runtimeObject->mDraw ? "true" : "false");
+      }
+      else
+      {
+         ImGui::TextUnformatted("No runtime object state.");
+      }
+      ImGui::Separator();
+      ImGui::Text("Animated By: %s", collectObjectThreadRefs(mSelectedObjectIdx).c_str());
+      if (object.numMeshes > 0 && renderMeshSlot >= 0)
+         ImGui::Text("Render Mesh Slot: %d/%d", renderMeshSlot + 1, object.numMeshes);
+      else
+         ImGui::TextUnformatted("Render Mesh Slot: -");
+      ImGui::Text("Render Mesh Index: %d", renderMeshIndex);
+      if (renderMesh)
+      {
+         ImGui::Text("Mesh Type: %s", getMeshTypeName(renderMesh));
+         ImGui::Text("Mesh Flags: 0x%08x", renderMesh->mFlags);
+         ImGui::Text("Verts/Frame: %u  Frames: %u  MatFrames: %u",
+                     renderMesh->mVertsPerFrame, renderMesh->mNumFrames, renderMesh->mNumMatFrames);
+         ImGui::Text("Parent: %d  Radius: %.3f", renderMesh->mParent, renderMesh->mRadius);
+      }
+      else
+      {
+         ImGui::TextUnformatted("No render mesh resolved.");
+      }
+
+      ImGui::Columns(1);
+      ImGui::End();
    }
 
    void renderMaterialDebugWindow()
@@ -3626,6 +3839,7 @@ public:
       ImGui::End();
 
       renderMaterialDebugWindow();
+      renderObjectDebugWindow();
       
       // Update state changed by gui
       for (size_t i=0; i<mNextSequence.size(); i++)
