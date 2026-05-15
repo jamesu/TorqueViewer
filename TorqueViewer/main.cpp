@@ -293,6 +293,17 @@ public:
       return false;
    }
 
+   static bool openRelatedResourceStream(ResManager* resourceManager, const std::string& resourceFilename, int32_t resourceMount, const std::string& candidate, MemRStream& outStream, std::string* outResolvedPath = NULL)
+   {
+      if (candidate.empty())
+         return false;
+
+      if (tryOpenTextureCandidate(resourceManager, candidate, outStream, resourceMount, outResolvedPath))
+         return true;
+
+      return tryOpenMountedTexturePath(resourceManager, candidate, resourceFilename, resourceMount, outStream, outResolvedPath);
+   }
+
    static bool openTextureStreamWithFallback(ResManager* resourceManager, const std::string& resourceFilename, int32_t resourceMount, const char* filename, MemRStream& outStream, std::string* outResolvedPath = NULL)
    {
       const std::string normalizedFilename = normalizeResourceSlashes(filename ? filename : "");
@@ -327,7 +338,7 @@ public:
       fprintf(stderr, "\n");
 
       if (!normalizedFilename.empty() &&
-          tryOpenTextureCandidate(resourceManager, normalizedFilename, outStream, resourceMount, outResolvedPath))
+          openRelatedResourceStream(resourceManager, resourceFilename, resourceMount, normalizedFilename, outStream, outResolvedPath))
       {
          return true;
       }
@@ -345,10 +356,7 @@ public:
             const std::string candidate = normalizeResourceSlashes(candidatePath.generic_string());
             fprintf(stderr, "texture search: relative try depth=%d dir='%s' candidate='%s'\n",
                     depth, searchDir.generic_string().c_str(), candidate.c_str());
-            if (tryOpenTextureCandidate(resourceManager, candidate, outStream, resourceMount, outResolvedPath))
-               return true;
-
-            if (tryOpenMountedTexturePath(resourceManager, candidate, resourceFilename, resourceMount, outStream, outResolvedPath))
+            if (openRelatedResourceStream(resourceManager, resourceFilename, resourceMount, candidate, outStream, outResolvedPath))
                return true;
          }
 
@@ -956,14 +964,19 @@ public:
 
          std::string iflName = mShape->getName(ifl.name);
          iflName = normalizeResourceSlashes(iflName);
-         const std::string fullPath = normalizeResourceSlashes((resourceDir / fs::path(iflName)).generic_string());
 
          MemRStream stream(0, NULL);
-         if (!mResourceManager->openFile(fullPath.c_str(), stream, mResourceMount))
+         std::string resolvedPath;
+         if (!openRelatedResourceStream(mResourceManager, mResourceFilename, mResourceMount, iflName, stream, &resolvedPath) &&
+             !openRelatedResourceStream(mResourceManager, mResourceFilename, mResourceMount,
+                                        normalizeResourceSlashes((resourceDir / fs::path(iflName)).generic_string()),
+                                        stream, &resolvedPath))
          {
             ifl.firstFrame = ifl.slot;
             continue;
          }
+
+         const fs::path iflBaseDir = fs::path(normalizeResourceSlashes(resolvedPath)).parent_path();
 
          float totalTime = 0.0f;
          std::string contents((const char*)stream.mPtr, (size_t)stream.mSize);
@@ -989,7 +1002,12 @@ public:
             textureName = normalizeResourceSlashes(textureName);
             fs::path texturePath(textureName);
             if (hasRecognizedTextureExtension(texturePath))
-               textureName = normalizeResourceSlashes(texturePath.replace_extension().generic_string());
+               texturePath.replace_extension();
+
+            if (!iflBaseDir.empty() && !texturePath.is_absolute())
+               texturePath = iflBaseDir / texturePath;
+
+            textureName = normalizeResourceSlashes(texturePath.generic_string());
 
             MaterialList::Material props = {};
             if (ifl.slot >= 0 && ifl.slot < (int32_t)mShape->mMaterials.size())
