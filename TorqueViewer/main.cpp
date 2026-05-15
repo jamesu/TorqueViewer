@@ -944,6 +944,7 @@ public:
       if (!mShape || !mResourceManager || mShape->mIflMaterialsInitialized)
          return true;
 
+      const size_t baseMaterialCount = mShape->mMaterials.size();
       mShape->mIflFrameTimes.clear();
       mShape->mIflFrameTimes.resize(mShape->mMaterials.size(), 0.0f);
 
@@ -1006,6 +1007,14 @@ public:
       }
 
       mShape->mIflMaterialsInitialized = true;
+      fprintf(stderr, "ifl init: baseMaterials=%zu totalMaterials=%zu iflMaterials=%zu iflFrameTimes=%zu\n",
+              baseMaterialCount, mShape->mMaterials.size(), mShape->mIflMaterials.size(), mShape->mIflFrameTimes.size());
+      for (size_t i = 0; i < mShape->mIflMaterials.size(); ++i)
+      {
+         const Dts3::IflMaterial& ifl = mShape->mIflMaterials[i];
+         fprintf(stderr, "ifl init: idx=%zu slot=%d firstFrame=%d numFrames=%d name='%s'\n",
+                 i, ifl.slot, ifl.firstFrame, ifl.numFrames, mShape->getName(ifl.name) ? mShape->getName(ifl.name) : "<unnamed>");
+      }
       return true;
    }
 
@@ -3091,6 +3100,7 @@ public:
    float xRot, yRot, mDetailDist;
    Dts3::Shape* mShape;
    int32_t mHighlightNodeIdx;
+   int32_t mSelectedMaterialIdx;
    
    std::vector<const char*> mSequenceList;
    std::vector<int> mNextSequence;
@@ -3110,6 +3120,7 @@ public:
       yRot = 0.0f;
       mShape = NULL;
       mHighlightNodeIdx = -1;
+      mSelectedMaterialIdx = 0;
       mRemoveThreadId = -1;
       mRenderNodes = true;
       mManualThreads = false;
@@ -3174,6 +3185,7 @@ public:
          mViewer.setResourcePath(filename, pathIdx);
          mViewer.loadShape(*mShape);
          mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
+         mSelectedMaterialIdx = 0;
          rebuildSequenceUI();
          
          const float viewDist = std::max(mViewer.mShape->mRadius * 2.0f, 1.0f);
@@ -3206,10 +3218,115 @@ public:
       mViewer.clear();
       mViewer.loadShape(*mShape);
       mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
+      mSelectedMaterialIdx = 0;
       rebuildSequenceUI();
       return true;
    }
 
+   void renderMaterialDebugWindow()
+   {
+      ImGui::Begin("Materials");
+
+      if (mShape == NULL || mViewer.mMaterialList == NULL)
+      {
+         ImGui::TextUnformatted("No shape loaded.");
+         ImGui::End();
+         return;
+      }
+
+      const int materialCount = (int)mViewer.mMaterialList->mMaterials.size();
+      if (materialCount <= 0)
+      {
+         ImGui::TextUnformatted("No materials.");
+         ImGui::End();
+         return;
+      }
+
+      mSelectedMaterialIdx = std::clamp(mSelectedMaterialIdx, 0, materialCount - 1);
+
+      int iflFrameMaterialCount = 0;
+      for (const MaterialList::Material& material : mViewer.mMaterialList->mMaterials)
+      {
+         if ((material.tsProps.flags & MaterialList::IflFrame) != 0)
+            iflFrameMaterialCount++;
+      }
+
+      ImGui::Text("Total: %d  IFL Materials: %d  IFL Frames: %d",
+                  materialCount, (int)mShape->mIflMaterials.size(), iflFrameMaterialCount);
+      ImGui::Separator();
+
+      ImGui::Columns(2, "materials_columns", true);
+
+      if (ImGui::BeginListBox("##material_list", ImVec2(-FLT_MIN, 320.0f)))
+      {
+         for (int i = 0; i < materialCount; ++i)
+         {
+            const MaterialList::Material& mat = mViewer.mMaterialList->mMaterials[i];
+            const bool selected = i == mSelectedMaterialIdx;
+            const char* matName = mat.name.empty() ? "<blank>" : mat.name.c_str();
+            char entryLabel[1024];
+            snprintf(entryLabel, sizeof(entryLabel), "%s##mat_%d", matName, i);
+            if (ImGui::Selectable(entryLabel, selected))
+               mSelectedMaterialIdx = i;
+            if (ImGui::IsItemFocused())
+               mSelectedMaterialIdx = i;
+            if (selected)
+               ImGui::SetItemDefaultFocus();
+         }
+         ImGui::EndListBox();
+      }
+
+      ImGui::NextColumn();
+
+      const MaterialList::Material& mat = mViewer.mMaterialList->mMaterials[mSelectedMaterialIdx];
+      const GenericViewer::ActiveMaterial* activeMat = mSelectedMaterialIdx < (int)mViewer.mActiveMaterials.size() ? &mViewer.mActiveMaterials[mSelectedMaterialIdx] : NULL;
+      const GenericViewer::LoadedTexture* tex = activeMat ? &activeMat->tex : NULL;
+      void* textureHandle = tex ? GFXGetTextureViewHandle(tex->texID) : NULL;
+
+      ImGui::Text("Index: %d", mSelectedMaterialIdx);
+      ImGui::TextWrapped("Name: %s", mat.name.empty() ? "<blank>" : mat.name.c_str());
+      ImGui::Text("IFL Frame: %s", (mat.tsProps.flags & MaterialList::IflFrame) != 0 ? "yes" : "no");
+      ImGui::Separator();
+      ImGui::Text("Flags: 0x%04x", mat.tsProps.flags);
+      ImGui::Text("Reflect: %d  Bump: %d  Detail: %d",
+                  mat.tsProps.reflectanceMap, mat.tsProps.bumpMap, mat.tsProps.detailMap);
+      ImGui::Text("DetailScale: %.3f  ReflectAmt: %.3f",
+                  mat.tsProps.detailScale, mat.tsProps.reflectionAmount);
+
+      if (activeMat)
+      {
+         ImGui::Text("TexID: %d  Group: %u", activeMat->tex.texID, activeMat->texGroupID);
+         ImGui::Text("Size: %ux%u", activeMat->tex.width, activeMat->tex.height);
+      }
+      else
+      {
+         ImGui::TextUnformatted("No runtime material state.");
+      }
+
+      if (textureHandle)
+      {
+         ImGui::Separator();
+         ImGui::TextUnformatted("Preview");
+         float maxPreview = 256.0f;
+         float previewW = tex->width > 0 ? (float)tex->width : maxPreview;
+         float previewH = tex->height > 0 ? (float)tex->height : maxPreview;
+         float scale = 1.0f;
+         if (previewW > maxPreview || previewH > maxPreview)
+            scale = std::min(maxPreview / previewW, maxPreview / previewH);
+         previewW *= scale;
+         previewH *= scale;
+         ImGui::Image((ImTextureID)textureHandle, ImVec2(previewW, previewH));
+      }
+      else
+      {
+         ImGui::Separator();
+         ImGui::TextUnformatted("Preview unavailable.");
+      }
+
+      ImGui::Columns(1);
+      ImGui::End();
+   }
+   
    bool dumpLoadedShapeOBJ(const char *filename)
    {
       if (mShape == NULL || filename == NULL)
@@ -3419,6 +3536,8 @@ public:
       }
       ImGui::Checkbox("Render Nodes", &mRenderNodes);
       ImGui::End();
+
+      renderMaterialDebugWindow();
       
       // Update state changed by gui
       for (size_t i=0; i<mNextSequence.size(); i++)
@@ -3809,12 +3928,14 @@ int MainState::loop()
    uint64_t oldLastTicks = lastTicks;
    float dt = ((float)(curTicks - lastTicks)) / 1000.0f;
    lastTicks = curTicks;
-   
-   currentController->mCamRot += deltaRot * dt * 100;
-   slm::mat4 rotMat = slm::rotation_z(slm::radians(currentController->mCamRot.z)) * slm::rotation_y(slm::radians(currentController->mCamRot.y)) *  slm::rotation_x(slm::radians(currentController->mCamRot.x));
-   //rotMat = inverse(rotMat);
-   slm::vec4 forwardVec = rotMat * slm::vec4(deltaMovement, 0);
-   currentController->mViewPos += forwardVec.xyz() * currentController->mViewSpeed * dt;
+   const bool captureKeyboard = ImGui::GetIO().WantCaptureKeyboard;
+   if (!captureKeyboard)
+   {
+      currentController->mCamRot += deltaRot * dt * 100;
+      slm::mat4 rotMat = slm::rotation_z(slm::radians(currentController->mCamRot.z)) * slm::rotation_y(slm::radians(currentController->mCamRot.y)) *  slm::rotation_x(slm::radians(currentController->mCamRot.x));
+      slm::vec4 forwardVec = rotMat * slm::vec4(deltaMovement, 0);
+      currentController->mViewPos += forwardVec.xyz() * currentController->mViewSpeed * dt;
+   }
    
    int w, h;
    SDL_GetWindowSize(window, &w, &h);
@@ -3868,6 +3989,7 @@ int MainState::loop()
    while (SDL_PollEvent(&event))
    {
       ImGui_ImplSDL3_ProcessEvent(&event);
+      const bool captureKeyboardEvent = ImGui::GetIO().WantCaptureKeyboard;
       
       switch (event.type)
       {
@@ -3879,7 +4001,8 @@ int MainState::loop()
          case SDL_EVENT_KEY_DOWN:
          case SDL_EVENT_KEY_UP:
          {
-            slm::vec3 forwardVec = slm::vec3();
+            if (captureKeyboardEvent)
+               break;
             switch (event.key.key)
             {
                case SDLK_A:  deltaMovement.x = event.type == SDL_EVENT_KEY_DOWN ? -1 : 0; break;

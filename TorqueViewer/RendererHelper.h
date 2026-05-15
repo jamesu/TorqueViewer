@@ -35,6 +35,7 @@ extern void GFXUpdateCustomTextureAligned(int32_t texID, void* texData);
 extern int32_t GFXLoadTexture(Bitmap* bmp, Palette*pal);
 extern int32_t GFXLoadTextureSet(uint32_t numBitmaps, Bitmap** bmps, Palette*pal);
 extern void GFXDeleteTexture(int32_t texID);
+extern void* GFXGetTextureViewHandle(int32_t texID);
 //
 extern void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds, uint32_t numSkinVerts);
 extern void GFXClearModelData(uint32_t modelId);

@@ -2283,6 +2283,18 @@ void GFXDeleteTexture(int32_t texID)
    tex.texBindGroup = NULL;
 }
 
+void* GFXGetTextureViewHandle(int32_t texID)
+{
+   if (texID < 0 || texID >= smState.textures.size())
+      return NULL;
+
+   SDLState::TexInfo& tex = smState.textures[texID];
+   if (tex.textureView == NULL)
+      return NULL;
+
+   return (void*)tex.textureView;
+}
+
 void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds, uint32_t numSkinVerts)
 {
    SDLState::FrameModel blankModel = {};
