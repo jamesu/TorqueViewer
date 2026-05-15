@@ -830,23 +830,22 @@ struct IO
       ds.readCheck();
       
       // Reading meshes
-      // NOTE: to simplify things, we ignore skipping.
-      uint32_t totalMeshes = numMeshes + numSkins; // should just be numMeshes in version <23
+      // NOTE: pre-v23 shapes serialize base meshes first, then a separate skin mesh tail.
+      const uint32_t totalMeshes = ds.getVersion() < 23 ? (numMeshes + numSkins) : numMeshes;
       
       if (ds.getVersion() > 15)
       {
-         shape->mMeshes.resize(numMeshes);
-         int numMeshesRead = 0;
-         for (Mesh& m : shape->mMeshes)
+         shape->mMeshes.resize(totalMeshes);
+         for (uint32_t i = 0; i < numMeshes; ++i)
          {
+            Mesh& m = shape->mMeshes[i];
             ds.read(m.mType);
             bool didRead = readMesh(&m, shape, ds);
-            numMeshesRead++;
          }
       }
       else
       {
-         shape->mMeshes.resize(numMeshes);
+         shape->mMeshes.resize(totalMeshes);
          
          // Use mesh index list
          for (uint32_t i=0; i<meshIndexList.size(); i++)
@@ -867,9 +866,6 @@ struct IO
          assert(false);
       }
       
-      // Resolve mesh parents
-      resolveMeshParents(shape);
-      
       ds.readCheck();
       
       // Reading names
@@ -886,7 +882,7 @@ struct IO
       {
          // Skinned mesh counts are stored here
          std::vector<int32_t> detailFirstSkin(numDetails);
-         std::vector<int32_t> detailNumSkins(numSkins);
+         std::vector<int32_t> detailNumSkins(numDetails);
          
          for (int32_t& value : detailFirstSkin)
          {
@@ -909,9 +905,10 @@ struct IO
          ds.readCheck();
          
          correctPreV32Skins(shape, detailFirstSkin, detailNumSkins, numMeshes, numSkins, numDetails);
-         
-         assert(false);
       }
+      
+      // Resolve mesh parents after any pre-v23 skin repack so the final mesh layout is stable.
+      resolveMeshParents(shape);
       
       if (!triangulateShapePrimitives(shape))
          return false;
