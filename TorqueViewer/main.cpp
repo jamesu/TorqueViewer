@@ -824,6 +824,15 @@ public:
    std::vector<slm::mat4> mNodeTransforms; // Current transform list (including parent)
    std::vector<slm::mat4> mDefaultNodeTransforms; // Default/bind absolute node transforms
    
+   enum class ScaleMode : uint8_t
+   {
+      None,
+      Uniform,
+      Aligned,
+      Arbitrary
+   };
+   ScaleMode mScaleMode;
+   
    // Working node animation values
    std::vector<slm::quat> mActiveRotations; // non-gl xfms
    std::vector<slm::vec4> mActiveTranslations; // non-gl xfms
@@ -974,6 +983,7 @@ public:
       mResourceManager = res;
       initVB = false;
       mDebugRenderDecals = false;
+      mScaleMode = ScaleMode::None;
    }
    
    ~ShapeViewer()
@@ -1004,6 +1014,7 @@ public:
       mActiveAlignedScales.clear();
       mActiveArbitraryScales.clear();
       mHandsOffNodes.reset();
+      mScaleMode = ScaleMode::None;
       mGroundThreadIdx = -1;
       mCurrentDetail = -1;
       mTriggerStateFlags = 0;
@@ -1670,6 +1681,7 @@ public:
    {
       // NOTE: this adds on a bunch of scale computations if enabled
       mApplyScaleTransforms = false;
+      mScaleMode = ScaleMode::None;
       forEachSortedThread([&](Dts3::Thread& thread){
          if (thread.sequenceIdx >= 0)
          {
@@ -1677,6 +1689,12 @@ public:
             if (seq.testFlags(Dts3::Sequence::AnyScale))
             {
                mApplyScaleTransforms = true;
+               if (seq.testFlags(Dts3::Sequence::ArbitraryScale))
+                  mScaleMode = ScaleMode::Arbitrary;
+               else if (seq.testFlags(Dts3::Sequence::AlignedScale) && mScaleMode != ScaleMode::Arbitrary)
+                  mScaleMode = ScaleMode::Aligned;
+               else if (seq.testFlags(Dts3::Sequence::UniformScale) && mScaleMode == ScaleMode::None)
+                  mScaleMode = ScaleMode::Uniform;
                return;
             }
          }
@@ -1920,6 +1938,48 @@ public:
       return true;
    }
 
+   bool sampleSequenceArbitraryScaleForNode(Dts3::Sequence& sequence, const Dts3::Thread::KeyFrameInfo& keyInfo, int32_t nodeIdx, Dts3::ArbitraryScale& outScale)
+   {
+      int32_t scaleIndex = getNodeMatterIndex(sequence.mattersScale, nodeIdx);
+      if (scaleIndex < 0 || !sequence.testFlags(Dts3::Sequence::ArbitraryScale))
+         return false;
+
+      Dts3::ArbitraryScale scaleA = mShape->getSequenceArbitraryScale(sequence, keyInfo.keyA, scaleIndex);
+      Dts3::ArbitraryScale scaleB = mShape->getSequenceArbitraryScale(sequence, keyInfo.keyB, scaleIndex);
+      outScale.rot = scaleA.rot;
+      outScale.pos = slm::mix(scaleA.pos, scaleB.pos, keyInfo.keyPos);
+      return true;
+   }
+
+   slm::mat4 buildArbitraryScaleMatrix(const Dts3::ArbitraryScale& scale) const
+   {
+      slm::mat4 scaleRot(1.0f);
+      CompatQuatSetMatrix(scale.rot.toQuat(), scaleRot);
+      return scaleRot * slm::scaling(scale.pos) * inverse(scaleRot);
+   }
+
+   void applyNodeScaleMatrix(slm::mat4& mat, int32_t nodeIdx) const
+   {
+      if (!mApplyScaleTransforms)
+         return;
+
+      switch (mScaleMode)
+      {
+         case ScaleMode::Uniform:
+            mat = mat * slm::scaling(slm::vec3(mActiveUniformScales[nodeIdx]));
+            break;
+         case ScaleMode::Aligned:
+            mat = mat * slm::scaling(mActiveAlignedScales[nodeIdx]);
+            break;
+         case ScaleMode::Arbitrary:
+            mat = mat * buildArbitraryScaleMatrix(mActiveArbitraryScales[nodeIdx]);
+            break;
+         case ScaleMode::None:
+         default:
+            break;
+      }
+   }
+
    void initializeActiveNodeTransforms(const Dts3::SubShape& subShape)
    {
       const size_t nodeCount = mShape->mNodes.size();
@@ -2069,8 +2129,7 @@ public:
          CompatQuatSetMatrix(mActiveRotations[nodeIdx], localTransform);
          localTransform[3] = mActiveTranslations[nodeIdx];
 
-         if (mApplyScaleTransforms)
-            localTransform = localTransform * slm::scaling(mActiveAlignedScales[nodeIdx]);
+         applyNodeScaleMatrix(localTransform, nodeIdx);
 
          mLocalNodeTransforms[nodeIdx] = localTransform;
       }
@@ -2175,11 +2234,23 @@ public:
             hasBlend = true;
          }
 
-         slm::vec3 blendScale;
-         if (sampleSequenceScaleForNode(sequence, thread.keyInfo, nodeIdx, blendScale))
+         if (sequence.testFlags(Dts3::Sequence::ArbitraryScale))
          {
-            blendMat = blendMat * slm::scaling(blendScale);
-            hasBlend = true;
+            Dts3::ArbitraryScale blendScale;
+            if (sampleSequenceArbitraryScaleForNode(sequence, thread.keyInfo, nodeIdx, blendScale))
+            {
+               blendMat = blendMat * buildArbitraryScaleMatrix(blendScale);
+               hasBlend = true;
+            }
+         }
+         else
+         {
+            slm::vec3 blendScale;
+            if (sampleSequenceScaleForNode(sequence, thread.keyInfo, nodeIdx, blendScale))
+            {
+               blendMat = blendMat * slm::scaling(blendScale);
+               hasBlend = true;
+            }
          }
 
          if (hasBlend)
@@ -2238,11 +2309,31 @@ public:
             const bool affectsScale = thread.transitionState.oldScales.test(nodeIdx) || newSequence.mattersScale.test(nodeIdx);
             if (affectsScale)
             {
-               slm::vec3 oldScale = mShape->getDefaultNodeScale(nodeIdx);
-               slm::vec3 newScale = mShape->getDefaultNodeScale(nodeIdx);
-               sampleSequenceScaleForNode(oldSequence, oldKeyInfo, nodeIdx, oldScale);
-               sampleSequenceScaleForNode(newSequence, thread.keyInfo, nodeIdx, newScale);
-               mActiveAlignedScales[nodeIdx] = slm::mix(oldScale, newScale, t);
+               if (oldSequence.testFlags(Dts3::Sequence::ArbitraryScale) || newSequence.testFlags(Dts3::Sequence::ArbitraryScale))
+               {
+                  Dts3::ArbitraryScale oldScale;
+                  Dts3::ArbitraryScale newScale;
+                  if (!sampleSequenceArbitraryScaleForNode(oldSequence, oldKeyInfo, nodeIdx, oldScale))
+                  {
+                     oldScale.rot = Quat16();
+                     oldScale.pos = slm::vec3(1.0f);
+                  }
+                  if (!sampleSequenceArbitraryScaleForNode(newSequence, thread.keyInfo, nodeIdx, newScale))
+                  {
+                     newScale.rot = Quat16();
+                     newScale.pos = slm::vec3(1.0f);
+                  }
+                  mActiveArbitraryScales[nodeIdx].rot = oldScale.rot;
+                  mActiveArbitraryScales[nodeIdx].pos = slm::mix(oldScale.pos, newScale.pos, t);
+               }
+               else
+               {
+                  slm::vec3 oldScale(1.0f);
+                  slm::vec3 newScale(1.0f);
+                  sampleSequenceScaleForNode(oldSequence, oldKeyInfo, nodeIdx, oldScale);
+                  sampleSequenceScaleForNode(newSequence, thread.keyInfo, nodeIdx, newScale);
+                  mActiveAlignedScales[nodeIdx] = slm::mix(oldScale, newScale, t);
+               }
             }
          }
       }
