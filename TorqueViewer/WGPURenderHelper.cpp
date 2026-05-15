@@ -234,6 +234,7 @@ struct SDLState
    WGPUBindGroupLayout terrainSamplersLayout;
    WGPUBindGroup currentModelTransformGroup;
    int32_t currentModelTransformTexID;
+   int32_t fallbackDiffuseTexID;
    
    LineProgramInfo lineProgram;
    ModelProgramInfo modelProgram;
@@ -331,7 +332,7 @@ static LineProgramInfo buildLineProgram()
    
    // Create the pipeline layout
    WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
-   pipelineLayoutDesc.label = WGPUString("Pipeline Layout");
+   pipelineLayoutDesc.label = WGPUString("Line Pipeline Layout");
    pipelineLayoutDesc.bindGroupLayoutCount = 1;
    WGPUBindGroupLayout bindGroupLayouts[1] = {smState.commonUniformLayout};
    pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
@@ -438,7 +439,7 @@ static LineProgramInfo buildLineProgram()
    
    // Create the render pipeline descriptor
    WGPURenderPipelineDescriptor pipelineDesc = {};
-   pipelineDesc.label = WGPUString("Render Pipeline");
+   pipelineDesc.label = WGPUString("Line Render Pipeline");
    pipelineDesc.layout = pipelineLayout;
    pipelineDesc.vertex = vertexState;
    pipelineDesc.primitive = primitiveState;
@@ -448,6 +449,8 @@ static LineProgramInfo buildLineProgram()
    
    // Finally, create the pipeline
    ret.pipeline = wgpuDeviceCreateRenderPipeline(smState.gpuDevice, &pipelineDesc);
+   if (!ret.pipeline)
+      fprintf(stderr, "failed to create line render pipeline\n");
    
    return ret;
 }
@@ -459,7 +462,7 @@ static TerrainProgramInfo buildTerrainProgram()
    
    // Create the pipeline layout
    WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
-   pipelineLayoutDesc.label = WGPUString("Pipeline Layout");
+   pipelineLayoutDesc.label = WGPUString("Terrain Pipeline Layout");
    pipelineLayoutDesc.bindGroupLayoutCount = 2;
    WGPUBindGroupLayout bindGroupLayouts[2] = {smState.commonUniformLayout, smState.terrainTextureLayout};
    pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
@@ -519,7 +522,7 @@ static TerrainProgramInfo buildTerrainProgram()
    
    // Create the render pipeline descriptor
    WGPURenderPipelineDescriptor pipelineDesc = {};
-   pipelineDesc.label = WGPUString("Render Pipeline");
+   pipelineDesc.label = WGPUString("Terrain Render Pipeline");
    pipelineDesc.layout = pipelineLayout;
    pipelineDesc.vertex = vertexState;
    pipelineDesc.primitive = primitiveState;
@@ -539,7 +542,7 @@ ModelProgramInfo buildModelProgram()
    
    // Create the pipeline layout
    WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
-   pipelineLayoutDesc.label = WGPUString("Pipeline Layout");
+   pipelineLayoutDesc.label = WGPUString("Model Pipeline Layout");
    pipelineLayoutDesc.bindGroupLayoutCount = 3;
    WGPUBindGroupLayout bindGroupLayouts[3] = {smState.commonUniformLayout, smState.commonTextureLayout, smState.modelTransformLayout};
    pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
@@ -695,7 +698,7 @@ ModelProgramInfo buildModelProgram()
       
       // Create the render pipeline descriptor
       WGPURenderPipelineDescriptor pipelineDesc = {};
-      pipelineDesc.label = WGPUString("Render Pipeline");
+      pipelineDesc.label = WGPUString("Model Render Pipeline");
       pipelineDesc.layout = pipelineLayout;
       pipelineDesc.vertex = vertexState;
       pipelineDesc.primitive = primitiveState;
@@ -782,9 +785,12 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    imInfo.RenderTargetFormat = WGPUTextureFormat_BGRA8Unorm;
    imInfo.DepthStencilFormat = smState.depthStencilFormat;
    
-   smState.loadShaderModule("lineShader", "lineShader.wgsl", sLineShaderCode);
-   smState.loadShaderModule("modelShader", "skinnedModelShader.wgsl", sModelShaderCode);
-   smState.loadShaderModule("terrainShader", "terrainShader.wgsl", sTerrainShaderCode);
+   if (!smState.loadShaderModule("lineShader", "lineShader.wgsl", sLineShaderCode))
+      fprintf(stderr, "failed to load lineShader shader module\n");
+   if (!smState.loadShaderModule("modelShader", "skinnedModelShader.wgsl", sModelShaderCode))
+      fprintf(stderr, "failed to load modelShader shader module\n");
+   if (!smState.loadShaderModule("terrainShader", "terrainShader.wgsl", sTerrainShaderCode))
+      fprintf(stderr, "failed to load terrainShader shader module\n");
    
    // Init gui
    IMGUI_CHECKVERSION();
@@ -953,6 +959,7 @@ SDLState::SDLState()
    terrainTextureLayout = NULL;
    currentModelTransformGroup = NULL;
    currentModelTransformTexID = -1;
+   fallbackDiffuseTexID = -1;
    
    projectionMatrix = slm::mat4(1);
    modelMatrix = slm::mat4(1);
@@ -1297,6 +1304,7 @@ void SDLState::resetWGPUState()
    terrainTextureLayout = NULL;
    currentModelTransformGroup = NULL;
    currentModelTransformTexID = -1;
+   fallbackDiffuseTexID = -1;
 }
 
 WGPUBindGroup SDLState::makeSimpleTextureBG(WGPUTextureView tex, WGPUSampler sampler)
@@ -1321,6 +1329,90 @@ WGPUBindGroup SDLState::makeSimpleTextureBG(WGPUTextureView tex, WGPUSampler sam
    
    // Create the bind group
    return wgpuDeviceCreateBindGroup(gpuDevice, &bindGroupDesc);
+}
+
+static int32_t ensureFallbackDiffuseTexture()
+{
+   if (smState.fallbackDiffuseTexID >= 0 &&
+       smState.fallbackDiffuseTexID < smState.textures.size() &&
+       smState.textures[smState.fallbackDiffuseTexID].texture != NULL &&
+       smState.textures[smState.fallbackDiffuseTexID].texBindGroup != NULL)
+   {
+      return smState.fallbackDiffuseTexID;
+   }
+
+   static constexpr uint32_t CheckerSize = 16;
+   WGPUTextureDescriptor textureDesc = {};
+   textureDesc.size = (WGPUExtent3D){CheckerSize, CheckerSize, 1};
+   textureDesc.mipLevelCount = 1;
+   textureDesc.sampleCount = 1;
+   textureDesc.dimension = WGPUTextureDimension_2D;
+   textureDesc.format = WGPUTextureFormat_RGBA8Unorm;
+   textureDesc.usage = WGPUTextureUsage_CopyDst | WGPUTextureUsage_TextureBinding;
+
+   WGPUTexture tex = wgpuDeviceCreateTexture(smState.gpuDevice, &textureDesc);
+   if (!tex)
+      return -1;
+
+   WGPUTextureViewDescriptor textureViewDesc = {};
+   textureViewDesc.format = WGPUTextureFormat_RGBA8Unorm;
+   textureViewDesc.dimension = WGPUTextureViewDimension_2D;
+   textureViewDesc.mipLevelCount = 1;
+   textureViewDesc.arrayLayerCount = 1;
+   WGPUTextureView texView = wgpuTextureCreateView(tex, &textureViewDesc);
+
+   WGPUTexelCopyBufferLayout layout = {};
+   layout.offset = 0;
+   layout.bytesPerRow = 256;
+   layout.rowsPerImage = CheckerSize;
+
+   uint8_t upload[256 * CheckerSize] = {};
+   for (uint32_t y = 0; y < CheckerSize; y++)
+   {
+      for (uint32_t x = 0; x < CheckerSize; x++)
+      {
+         const bool light = (((x >> 1) ^ (y >> 1)) & 1u) == 0;
+         const uint8_t r = light ? 255 : 0;
+         const uint8_t g = light ? 255 : 64;
+         const uint8_t b = light ? 0 : 255;
+         const uint32_t pixelOffset = y * 256 + x * 4;
+         upload[pixelOffset + 0] = r;
+         upload[pixelOffset + 1] = g;
+         upload[pixelOffset + 2] = b;
+         upload[pixelOffset + 3] = 255;
+      }
+   }
+   WGPUExtent3D size = {CheckerSize, CheckerSize, 1};
+   WGPUTexelCopyTextureInfo copyInfo = {};
+   copyInfo.texture = tex;
+   copyInfo.mipLevel = 0;
+   copyInfo.origin = (WGPUOrigin3D){0, 0, 0};
+   copyInfo.aspect = WGPUTextureAspect_All;
+   wgpuQueueWriteTexture(smState.gpuQueue, &copyInfo, upload, sizeof(upload), &layout, &size);
+
+   SDLState::TexInfo newInfo = {};
+   newInfo.texture = tex;
+   newInfo.textureView = texView;
+   newInfo.texBindGroup = smState.makeSimpleTextureBG(texView, smState.modelCommonSampler);
+   newInfo.bytesPerRow = 256;
+   newInfo.dims[0] = CheckerSize;
+   newInfo.dims[1] = CheckerSize;
+   newInfo.dims[2] = 1;
+
+   int sz = (int)smState.textures.size();
+   for (int i = 0; i < sz; i++)
+   {
+      if (smState.textures[i].texture == NULL)
+      {
+         smState.textures[i] = newInfo;
+         smState.fallbackDiffuseTexID = i;
+         return i;
+      }
+   }
+
+   smState.textures.push_back(newInfo);
+   smState.fallbackDiffuseTexID = (int32_t)(smState.textures.size() - 1);
+   return smState.fallbackDiffuseTexID;
 }
 
 WGPUBindGroup SDLState::makeModelTransformBG(WGPUTextureView tex)
@@ -2325,14 +2417,19 @@ void GFXSetModelTransformTexture(int32_t texID)
 void GFXSetTSMaterialResources(uint32_t tsGroupID, int32_t diffuseTexID, int32_t emapAlphaTexID, int32_t emapTexID, int32_t dmapID)
 {
    int32_t bindTexID = diffuseTexID >= 0 ? diffuseTexID : (int32_t)tsGroupID;
-   if (bindTexID < 0 || bindTexID >= smState.textures.size())
-      return;
-   
+   if (bindTexID < 0 ||
+       bindTexID >= smState.textures.size() ||
+       smState.textures[bindTexID].texture == NULL ||
+       smState.textures[bindTexID].texBindGroup == NULL)
+   {
+      bindTexID = ensureFallbackDiffuseTexture();
+      if (bindTexID < 0 || bindTexID >= smState.textures.size())
+         return;
+   }
+
    SDLState::TexInfo& info = smState.textures[bindTexID];
    if (info.texBindGroup)
-   {
       wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 1, info.texBindGroup, 0, NULL);
-   }
 }
 
 void GFXSetITRMaterialResources(uint32_t itrGroupID, int32_t baseTexID, int32_t emapTexID, int32_t lightmapTexID)
@@ -2515,6 +2612,13 @@ void GFXBeginTerrainPipelineState(TerrainPipelineState state, uint32_t terrainID
 
 void GFXBeginLinePipelineState()
 {
+   if (!smState.lineProgram.pipeline)
+   {
+      smState.currentPipeline = NULL;
+      smState.currentProgram = NULL;
+      return;
+   }
+
    smState.currentPipeline = smState.lineProgram.pipeline;
    smState.currentProgram = &smState.lineProgram;
    wgpuRenderPassEncoderSetPipeline(smState.renderEncoder, smState.currentPipeline);
@@ -2524,6 +2628,13 @@ void GFXBeginLinePipelineState()
 
 void GFXDrawLine(slm::vec3 start, slm::vec3 end, slm::vec4 color, float width)
 {
+   if (smState.currentProgram != &smState.lineProgram ||
+       smState.currentPipeline != smState.lineProgram.pipeline ||
+       !smState.lineProgram.pipeline)
+   {
+      return;
+   }
+
    _LineVert verts[6];
    verts[0].pos = start;
    verts[0].nextPos = end;

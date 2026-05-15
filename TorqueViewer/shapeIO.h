@@ -1427,11 +1427,18 @@ struct IO
       
       BasicData* basicData = NULL;
       SkinData* skinData = NULL;
+      SortedData* sortedData = NULL;
       
       if (mesh->mType == Mesh::T_Skin)
       {
          mesh->mData = std::make_shared<SkinData>();
          skinData = (SkinData*)mesh->mData.get();
+         basicData = (BasicData*)mesh->mData.get();
+      }
+      else if (mesh->mType == Mesh::T_Sorted)
+      {
+         mesh->mData = std::make_shared<SortedData>();
+         sortedData = (SortedData*)mesh->mData.get();
          basicData = (BasicData*)mesh->mData.get();
       }
       else if (mesh->mType != Mesh::T_Decal)
@@ -1597,6 +1604,16 @@ struct IO
       {
          mesh->mData = std::make_shared<DecalData>();
          DecalData* decalData = (DecalData*)mesh->mData.get();
+
+         if (ds.getVersion() < 20)
+         {
+            ds.readCheck();
+            for (uint32_t i = 0; i < 15; i++)
+            {
+               uint32_t unused = 0;
+               ds.read(unused);
+            }
+         }
          
          ds.read(sz);
          decalData->primitives.resize(sz);
@@ -1614,30 +1631,41 @@ struct IO
          decalData->startPrimitive.resize(sz);
          ds.read32(sz, decalData->startPrimitive.data());
          
-         ds.read(sz);
-         decalData->texGenS.resize(sz);
-         
-         for (slm::vec4& texGen : decalData->texGenS)
+         decalData->texGenS.clear();
+         decalData->texGenT.clear();
+         if (ds.getVersion() >= 19)
          {
-            IO::readPoint4F(ds, texGen);
-         }
-         
-         ds.read(sz);
-         decalData->texGenT.resize(sz);
-         
-         for (slm::vec4& texGen : decalData->texGenT)
-         {
-            IO::readPoint4F(ds, texGen);
+            decalData->texGenS.resize(decalData->startPrimitive.size());
+            for (slm::vec4& texGen : decalData->texGenS)
+            {
+               IO::readPoint4F(ds, texGen);
+            }
+
+            decalData->texGenT.resize(decalData->startPrimitive.size());
+            for (slm::vec4& texGen : decalData->texGenT)
+            {
+               IO::readPoint4F(ds, texGen);
+            }
          }
          
          ds.read(decalData->matIndex);
-         ds.readCheck();
+
+         if (ds.getVersion() < 20)
+         {
+            for (uint32_t i = 0; i < 3; i++)
+            {
+               uint32_t unused = 0;
+               ds.read(unused);
+            }
+            ds.readCheck();
+         }
+         else
+         {
+            ds.readCheck();
+         }
       }
-      else if (mesh->mType == Mesh::T_Sorted)
+      else if (sortedData)
       {
-         mesh->mData = std::make_shared<SortedData>();
-         SortedData* sortedData = (SortedData*)mesh->mData.get();
-         
          ds.read(sz);
          sortedData->clusters.resize(sz);
          
@@ -1662,7 +1690,9 @@ struct IO
          sortedData->firstTVerts.resize(sz);
          ds.read32(sz, sortedData->firstTVerts.data());
          
-         ds.read(sortedData->alwaysWriteDepth);
+         uint32_t alwaysWriteDepth = 0;
+         ds.read(alwaysWriteDepth);
+         sortedData->alwaysWriteDepth = alwaysWriteDepth != 0;
          
          ds.readCheck();
       }

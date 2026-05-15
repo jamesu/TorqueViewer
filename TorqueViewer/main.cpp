@@ -178,14 +178,16 @@ public:
       uint32_t bmpFlags;
       uint16_t width, height;
       
-      LoadedTexture() {;}
-      LoadedTexture(int32_t tid, uint32_t bf) : texID(tid), bmpFlags(bf) {;}
+      LoadedTexture() : texID(-1), bmpFlags(0), width(0), height(0) {;}
+      LoadedTexture(int32_t tid, uint32_t bf) : texID(tid), bmpFlags(bf), width(0), height(0) {;}
    };
    
    struct ActiveMaterial
    {
       LoadedTexture tex;
       uint32_t texGroupID;
+
+      ActiveMaterial() : texGroupID(UINT32_MAX) {;}
    };
    
    std::vector<ActiveMaterial> mActiveMaterials;
@@ -2133,7 +2135,7 @@ public:
             {
                decalIdx = mShape->mDecals[decalIdx].nextSibling;
             }
-            mShape->mObjects[decalIdx].nextSibling = i;
+            mShape->mObjects[objectIdx].nextSibling = i;
          }
       }
       
