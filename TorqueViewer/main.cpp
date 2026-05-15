@@ -2050,12 +2050,21 @@ public:
             localTransform = localTransform * slm::scaling(mActiveAlignedScales[nodeIdx]);
 
          mLocalNodeTransforms[nodeIdx] = localTransform;
+      }
 
+      forEachSortedThread([&](Dts3::Thread& thread){
+         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
+         if (sequence.testFlags(Dts3::Sequence::Blend) && !thread.noBlend)
+            applyBlendSequence(thread, subShape);
+      });
+
+      for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
+      {
          int32_t parentIdx = mShape->mNodes[nodeIdx].parent;
          if (parentIdx >= 0 && parentIdx < mNodeTransforms.size())
-            mNodeTransforms[nodeIdx] = mNodeTransforms[parentIdx] * localTransform;
+            mNodeTransforms[nodeIdx] = mNodeTransforms[parentIdx] * mLocalNodeTransforms[nodeIdx];
          else
-            mNodeTransforms[nodeIdx] = localTransform;
+            mNodeTransforms[nodeIdx] = mLocalNodeTransforms[nodeIdx];
       }
    }
    
@@ -2107,12 +2116,6 @@ public:
          applyBaseSequence(thread, subShape, rotationSet, translationSet, scaleSet);
       }
 
-      forEachSortedThread([&](Dts3::Thread& thread){
-         Dts3::Sequence& sequence = mShape->mSequences[thread.sequenceIdx];
-         if (sequence.testFlags(Dts3::Sequence::Blend) && !thread.noBlend)
-            applyBlendSequence(thread, subShape);
-      });
-
       applyTransitionNodes(subShape);
       buildAnimatedNodeTransforms(subShape);
       updateTransformTexture();
@@ -2129,17 +2132,32 @@ public:
 
       for (int32_t nodeIdx = firstNode; nodeIdx < endNode; nodeIdx++)
       {
+         slm::mat4 blendMat(1.0f);
+         bool hasBlend = false;
+
          slm::quat blendRot;
          if (sampleSequenceRotationForNode(sequence, thread.keyInfo, nodeIdx, blendRot))
-            mActiveRotations[nodeIdx] = slm::normalize(mActiveRotations[nodeIdx] * blendRot);
+         {
+            CompatQuatSetMatrix(blendRot, blendMat);
+            hasBlend = true;
+         }
 
          slm::vec3 blendTrans;
          if (sampleSequenceTranslationForNode(sequence, thread.keyInfo, nodeIdx, blendTrans))
-            mActiveTranslations[nodeIdx] += slm::vec4(blendTrans, 0.0f);
+         {
+            blendMat[3] = slm::vec4(blendTrans, 1.0f);
+            hasBlend = true;
+         }
 
          slm::vec3 blendScale;
          if (sampleSequenceScaleForNode(sequence, thread.keyInfo, nodeIdx, blendScale))
-            mActiveAlignedScales[nodeIdx] *= blendScale;
+         {
+            blendMat = blendMat * slm::scaling(blendScale);
+            hasBlend = true;
+         }
+
+         if (hasBlend)
+            mLocalNodeTransforms[nodeIdx] = mLocalNodeTransforms[nodeIdx] * blendMat;
       }
    }
    
