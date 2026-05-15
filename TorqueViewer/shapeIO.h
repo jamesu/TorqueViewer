@@ -774,20 +774,24 @@ struct IO
             IO::readPoint3F(ds, shape->mNodeArbitraryScaleFactors[i]);
             IO::readQuat16(ds, shape->mNodeArbitraryScaleRotations[i]);
          }
+         
+         ds.readCheck();
       }
-      
-      ds.readCheck();
       
       // Reading ground frames
       shape->mGroundTranslations.resize(numGroundFrames);
       shape->mGroundRotations.resize(numGroundFrames);
-      for (int i = 0; i < numGroundFrames; ++i)
-      {
-         IO::readPoint3F(ds, shape->mGroundTranslations[i]);
-         IO::readQuat16(ds, shape->mGroundRotations[i]);
-      }
       
-      ds.readCheck();
+      if (ds.getVersion()>23)
+      {
+         for (int i = 0; i < numGroundFrames; ++i)
+         {
+            IO::readPoint3F(ds, shape->mGroundTranslations[i]);
+            IO::readQuat16(ds, shape->mGroundRotations[i]);
+         }
+         
+         ds.readCheck();
+      }
       
       // Reading object states
       shape->mObjectStates.resize(numObjectStates);
@@ -832,10 +836,12 @@ struct IO
       if (ds.getVersion() > 15)
       {
          shape->mMeshes.resize(numMeshes);
+         int numMeshesRead = 0;
          for (Mesh& m : shape->mMeshes)
          {
             ds.read(m.mType);
             bool didRead = readMesh(&m, shape, ds);
+            numMeshesRead++;
          }
       }
       else
@@ -1273,16 +1279,16 @@ struct IO
    
    template<typename T> static bool readDecal(T& ds, Decal& box)
    {
-      return false;
-   }
-   
-   template<typename T> static bool writeDecal(T& ds, const Decal& box)
-   {
       ds.read(box.name);
       ds.read(box.numMeshes);
       ds.read(box.firstMesh);
       ds.read(box.object);
       ds.read(box.nextSibling);
+      return false;
+   }
+   
+   template<typename T> static bool writeDecal(T& ds, const Decal& box)
+   {
       return true;
    }
    
@@ -1444,10 +1450,13 @@ struct IO
          IO::readPoint3F(ds, mesh->mCenter);
          ds.read(mesh->mRadius);
          
+         uint32_t numVerts = 0;
+         uint32_t numTVerts = 0;
+         
          if (mesh->mParent < 0)
          {
-            ds.read(sz);
-            basicData->verts.resize(sz);
+            ds.read(numVerts);
+            basicData->verts.resize(numVerts);
             for (slm::vec3& vert : basicData->verts)
             {
                IO::readPoint3F(ds, vert);
@@ -1455,13 +1464,13 @@ struct IO
          }
          else
          {
-            ds.read(sz); // TODO: important?
+            ds.read(numVerts);
          }
          
          if (mesh->mParent < 0)
          {
-            ds.read(sz);
-            basicData->tverts.resize(sz);
+            ds.read(numTVerts);
+            basicData->tverts.resize(numTVerts);
             for (slm::vec2& vert : basicData->tverts)
             {
                IO::readPoint2F(ds, vert);
@@ -1469,7 +1478,7 @@ struct IO
          }
          else
          {
-            ds.read(sz); // TODO: important?
+            ds.read(numTVerts);
          }
          
          if (mesh->mParent < 0)
@@ -1598,7 +1607,7 @@ struct IO
          }
          
          ds.read(sz);
-         basicData->indices.resize(sz);
+         decalData->indices.resize(sz);
          ds.read16(sz, decalData->indices.data());
          
          ds.read(sz);
@@ -1851,8 +1860,8 @@ struct SplitStream
       buffer16.read(c16);
       buffer32.read(c32);
       
-      if (c8 == checkCount &&
-          c16 == checkCount &&
+      if (c8 == (checkCount % 256) &&
+          c16 == (checkCount % 65536) &&
           c32 == checkCount) {
          checkCount++;
          return true;
