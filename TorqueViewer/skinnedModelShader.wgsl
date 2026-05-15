@@ -128,6 +128,6 @@ fn mainFrag(input: VertexOutput) -> FragmentOutput {
     //}
 
     var out: FragmentOutput;
-    out.Color = vec4<f32>(texColor.rgb,1);//vec4<f32>(texColor.rgb /* input.vLighting*/, texColor.a);
+    out.Color = vec4<f32>(texColor.rgba);//vec4<f32>(texColor.rgb /* input.vLighting*/, texColor.a);
     return out;
 }
