@@ -31,6 +31,7 @@
 #include <iostream>
 #include <fstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <numeric>
 
 #include "imgui.h"
@@ -124,50 +125,242 @@ void ConsolePersistObject::initStatics()
 class GenericViewer
 {
 public:
+   static std::string normalizeResourceSlashes(std::string path)
+   {
+      std::replace(path.begin(), path.end(), '\\', '/');
+      return path;
+   }
+
+   static bool tryOpenTextureCandidate(ResManager* resourceManager, const std::string& candidate, MemRStream& outStream, int32_t mountIdx, std::string* outResolvedPath = NULL)
+   {
+      fprintf(stderr, "texture search: trying candidate='%s' mount=%d\n", candidate.c_str(), mountIdx);
+      if (!resourceManager->openFile(candidate.c_str(), outStream, mountIdx))
+         return false;
+
+      fprintf(stderr, "texture search: opened candidate='%s' mount=%d\n", candidate.c_str(), mountIdx);
+      if (outResolvedPath)
+         *outResolvedPath = candidate;
+      return true;
+   }
+
+   static bool pathHasPrefix(const fs::path& path, const fs::path& prefix)
+   {
+      auto pathItr = path.begin();
+      auto prefixItr = prefix.begin();
+      for (; prefixItr != prefix.end(); ++prefixItr, ++pathItr)
+      {
+         if (pathItr == path.end() || *pathItr != *prefixItr)
+            return false;
+      }
+      return true;
+   }
+
+   static bool pathEndsWith(const fs::path& path, const fs::path& suffix)
+   {
+      std::vector<fs::path> pathParts(path.begin(), path.end());
+      std::vector<fs::path> suffixParts(suffix.begin(), suffix.end());
+      if (suffixParts.size() > pathParts.size())
+         return false;
+
+      const size_t startIndex = pathParts.size() - suffixParts.size();
+      for (size_t i = 0; i < suffixParts.size(); ++i)
+      {
+         if (pathParts[startIndex + i] != suffixParts[i])
+            return false;
+      }
+      return true;
+   }
+
+   static bool tryOpenTextureFromFilesystemMount(ResManager* resourceManager, const std::string& candidate, const fs::path& searchRoot, int32_t mountIdx, MemRStream& outStream, std::string* outResolvedPath = NULL)
+   {
+      if (mountIdx < 0 || mountIdx >= (int32_t)resourceManager->mPaths.size())
+         return false;
+
+      const fs::path mountPath = fs::path(resourceManager->mPaths[mountIdx]);
+      const fs::path absoluteRoot = searchRoot.empty() ? mountPath : (mountPath / searchRoot);
+      fprintf(stderr, "texture search: filesystem mount=%d root='%s' candidate='%s'\n",
+              mountIdx, absoluteRoot.generic_string().c_str(), candidate.c_str());
+      if (!fs::exists(absoluteRoot) || !fs::is_directory(absoluteRoot))
+      {
+         fprintf(stderr, "texture search: filesystem root missing mount=%d root='%s'\n",
+                 mountIdx, absoluteRoot.generic_string().c_str());
+         return false;
+      }
+
+      std::unordered_set<std::string> checkedCandidates;
+      auto tryDirectory = [&](const fs::path& relativeDir) -> bool
+      {
+         const fs::path candidatePath = relativeDir.empty() ? fs::path(candidate) : (relativeDir / fs::path(candidate));
+         if (candidatePath.empty() || candidatePath == ".")
+            return false;
+
+         const std::string normalizedCandidate = normalizeResourceSlashes(candidatePath.generic_string());
+         if (!checkedCandidates.insert(normalizedCandidate).second)
+            return false;
+
+         return tryOpenTextureCandidate(resourceManager, normalizedCandidate, outStream, mountIdx, outResolvedPath);
+      };
+
+      if (tryDirectory(searchRoot))
+         return true;
+
+      for (const fs::directory_entry& itr : fs::directory_iterator(absoluteRoot))
+      {
+         if (!itr.is_directory())
+            continue;
+
+         const fs::path relativeDir = itr.path().lexically_relative(mountPath);
+         if (tryDirectory(relativeDir))
+            return true;
+      }
+
+      return false;
+   }
+
+   static bool tryOpenTextureFromVolumeMount(ResManager* resourceManager, const std::string& candidate, const fs::path& searchRoot, int32_t mountIdx, MemRStream& outStream, std::string* outResolvedPath = NULL)
+   {
+      fprintf(stderr, "texture search: volume mount=%d root='%s' candidate='%s'\n",
+              mountIdx, searchRoot.generic_string().c_str(), candidate.c_str());
+      std::vector<ResManager::EnumEntry> fileList;
+      resourceManager->enumerateFiles(fileList, mountIdx, NULL);
+
+      const fs::path normalizedRoot = searchRoot.lexically_normal();
+      const fs::path candidatePath = fs::path(candidate).lexically_normal();
+      for (const ResManager::EnumEntry& entry : fileList)
+      {
+         fs::path entryPath = fs::path(normalizeResourceSlashes(entry.filename)).lexically_normal();
+         if (!pathEndsWith(entryPath, candidatePath))
+            continue;
+
+         fs::path baseDir = entryPath;
+         for (auto ignoredPart = candidatePath.begin(); ignoredPart != candidatePath.end(); ++ignoredPart)
+            baseDir = baseDir.parent_path();
+
+         if (!normalizedRoot.empty())
+         {
+            if (baseDir != normalizedRoot && baseDir.parent_path() != normalizedRoot)
+               continue;
+         }
+
+         fprintf(stderr, "texture search: volume matched entry='%s' mount=%d\n",
+                 entryPath.generic_string().c_str(), mountIdx);
+         return tryOpenTextureCandidate(resourceManager, entryPath.generic_string(), outStream, mountIdx, outResolvedPath);
+      }
+
+      return false;
+   }
+
+   static bool tryOpenMountedTexturePath(ResManager* resourceManager, const std::string& candidate, const std::string& resourceFilename, int32_t preferredMount, MemRStream& outStream, std::string* outResolvedPath = NULL)
+   {
+      const fs::path searchRoot;
+      const int32_t pathMountCount = (int32_t)resourceManager->mPaths.size();
+      const int32_t mountCount = pathMountCount + (int32_t)resourceManager->mVolumes.size();
+      fprintf(stderr, "texture search: mounted search candidate='%s' resource='%s' preferredMount=%d root='%s'\n",
+              candidate.c_str(), resourceFilename.c_str(), preferredMount, searchRoot.generic_string().c_str());
+
+      auto tryMount = [&](int32_t mountIdx) -> bool
+      {
+         if (mountIdx < 0 || mountIdx >= mountCount)
+            return false;
+
+         if (mountIdx < pathMountCount)
+            return tryOpenTextureFromFilesystemMount(resourceManager, candidate, searchRoot, mountIdx, outStream, outResolvedPath);
+         return tryOpenTextureFromVolumeMount(resourceManager, candidate, searchRoot, mountIdx, outStream, outResolvedPath);
+      };
+
+      if (tryMount(preferredMount))
+         return true;
+
+      for (int32_t mountIdx = 0; mountIdx < mountCount; mountIdx++)
+      {
+         if (mountIdx == preferredMount)
+            continue;
+         if (tryMount(mountIdx))
+            return true;
+      }
+
+      return false;
+   }
+
    static bool openTextureStreamWithFallback(ResManager* resourceManager, const std::string& resourceFilename, int32_t resourceMount, const char* filename, MemRStream& outStream, std::string* outResolvedPath = NULL)
    {
-      fs::path texturePath(filename);
-      fs::path textureStem = texturePath.stem();
+      const std::string normalizedFilename = normalizeResourceSlashes(filename ? filename : "");
+      fs::path texturePath(normalizedFilename);
+      fs::path textureStem = texturePath;
 
+      static const char* kKnownTextureExtensions[] = {
+         ".bmp",
+         ".gif",
+         ".png",
+         ".jpg",
+      };
       std::vector<std::string> extensionsToTry;
       std::string originalExt = texturePath.extension().generic_string();
-      if (!originalExt.empty())
+      std::transform(originalExt.begin(), originalExt.end(), originalExt.begin(), ::tolower);
+
+      bool hasKnownTextureExtension = false;
+      for (const char* knownExt : kKnownTextureExtensions)
+      {
+         if (originalExt == knownExt)
+         {
+            hasKnownTextureExtension = true;
+            break;
+         }
+      }
+
+      if (hasKnownTextureExtension)
       {
          extensionsToTry.push_back(originalExt);
+         textureStem = texturePath.stem();
       }
       else
       {
-         extensionsToTry.push_back(".bmp");
-         extensionsToTry.push_back(".gif");
-         extensionsToTry.push_back(".png");
-         extensionsToTry.push_back(".jpg");
+         for (const char* knownExt : kKnownTextureExtensions)
+            extensionsToTry.push_back(knownExt);
       }
 
-      fs::path searchDir = fs::path(resourceFilename).parent_path();
-      for (int depth = 0; depth < 2; ++depth)
+      fprintf(stderr, "texture search: request='%s' normalized='%s' resource='%s' mount=%d knownExt=%s\n",
+              filename ? filename : "", normalizedFilename.c_str(), resourceFilename.c_str(), resourceMount,
+              hasKnownTextureExtension ? "yes" : "no");
+      fprintf(stderr, "texture search: stem='%s' extensions=", textureStem.generic_string().c_str());
+      for (size_t i = 0; i < extensionsToTry.size(); ++i)
+      {
+         fprintf(stderr, "%s%s", i == 0 ? "" : ",", extensionsToTry[i].c_str());
+      }
+      fprintf(stderr, "\n");
+
+      if (!normalizedFilename.empty() &&
+          tryOpenTextureCandidate(resourceManager, normalizedFilename, outStream, resourceMount, outResolvedPath))
+      {
+         return true;
+      }
+
+      fs::path searchDir = fs::path(normalizeResourceSlashes(resourceFilename)).parent_path();
+      for (int depth = 0;; ++depth)
       {
          for (const std::string& ext : extensionsToTry)
          {
             fs::path candidatePath = searchDir / textureStem;
-            candidatePath.replace_extension(ext);
-            const std::string candidate = candidatePath.generic_string();
-            if (resourceManager->openFile(candidate.c_str(), outStream, resourceMount))
-            {
-               if (outResolvedPath)
-               {
-                  *outResolvedPath = candidate;
-               }
+            if (hasKnownTextureExtension)
+               candidatePath.replace_extension(ext);
+            else
+               candidatePath += ext;
+            const std::string candidate = normalizeResourceSlashes(candidatePath.generic_string());
+            fprintf(stderr, "texture search: relative try depth=%d dir='%s' candidate='%s'\n",
+                    depth, searchDir.generic_string().c_str(), candidate.c_str());
+            if (tryOpenTextureCandidate(resourceManager, candidate, outStream, resourceMount, outResolvedPath))
                return true;
-            }
+
+            if (tryOpenMountedTexturePath(resourceManager, candidate, resourceFilename, resourceMount, outStream, outResolvedPath))
+               return true;
          }
 
          if (searchDir.empty())
-         {
             break;
-         }
          searchDir = searchDir.parent_path();
       }
 
+      fprintf(stderr, "texture search: failed request='%s'\n", filename ? filename : "");
       return false;
    }
 
@@ -3368,6 +3561,38 @@ int MainState::boot()
       const char *path = in_argv[i];
       if (path && strcmp(path, "--dump-obj") == 0)
       {
+         i++;
+         continue;
+      }
+      if (path && strcmp(path, "--dump-packed-obj") == 0)
+      {
+         i++;
+         continue;
+      }
+      if (path && path[0] == '-')
+         continue;
+
+      fs::path filePath = path;
+      std::string  ext = filePath.extension();
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+      if (fs::is_directory(filePath))
+      {
+         resManager.mPaths.emplace_back(path);
+         continue;
+      }
+
+      if (ext == ".vol" || ext == ".zip")
+      {
+         resManager.addVolume(path);
+      }
+   }
+
+   for (int i=1; i<in_argc; i++)
+   {
+      const char *path = in_argv[i];
+      if (path && strcmp(path, "--dump-obj") == 0)
+      {
          if (i + 1 >= in_argc)
          {
             fprintf(stderr, "--dump-obj requires an output path\n");
@@ -3392,6 +3617,9 @@ int MainState::boot()
       fs::path filePath = path;
       std::string  ext = filePath.extension();
       std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+      if (fs::is_directory(filePath))
+         continue;
       
       if (ext == ".dts")
       {
@@ -3406,10 +3634,6 @@ int MainState::boot()
          }
          currentController = shapeController;
       }
-      else if (ext == ".vol" || ext == ".zip")
-      {
-         resManager.addVolume(path);
-      }
       else if (ext == ".dif")
       {
          //interiorController->loadInterior(path);
@@ -3419,10 +3643,6 @@ int MainState::boot()
       {
          //terrainController->loadSingleBlock(path);
          //currentController = terrainController;
-      }
-      else if (ext == "")
-      {
-         resManager.mPaths.emplace_back(path);
       }
    }
    
