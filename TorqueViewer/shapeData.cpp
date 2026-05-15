@@ -50,6 +50,15 @@ bool Shape::checkSkip(int meshNumber, int currentObject, int currentDecal, int s
 
 bool Shape::read(MemRStream& stream)
 {
+   MemRStream headerProbe = stream;
+   uint32_t hdr[4] = {};
+   if (!headerProbe.read(sizeof(hdr), hdr))
+      return false;
+
+   const uint32_t version = hdr[0] & 0xFF;
+   if (version < 19)
+      return IO::readLegacyUnifiedShape(this, stream, version);
+
    SplitStream split;
    if (!split.floodFromStream(stream))
    {

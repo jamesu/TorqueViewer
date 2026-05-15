@@ -563,6 +563,805 @@ struct IO
       return stream.mPos == stream.mSize;
    }
    
+   // ===== Legacy unified stream layout (v<19) =====
+   //
+   // Old DTS files are serialized as one unified stream rather than split
+   // 8/16/32-bit streams. The order is:
+   //   1) bounds + node/object/decal/IFL/subshape tables
+   //   2) optional pre-v16 mesh remap table
+   //   3) optional pre-v17 keyframe table
+   //   4) node/object/decal state blocks
+   //   5) triggers + details
+   //   6) sequences
+   //   7) meshes
+   //   8) names + material list
+   //   9) pre-v23 skin tail
+   //
+   // Version-specific differences:
+   //   - <16: mesh index list is present before keyframes
+   //   - <17: keyframes are present and must be transposed into the newer
+   //          per-track layout after all sequence data is loaded
+   //   - <18: primitive/index payload is stored in 32-bit form
+   //   - <19: unified-stream path is required
+   //   - <23: skin meshes are appended as a tail and then repacked into
+   //          objects after load
+   //   - >21: node scale blocks include separate uniform/aligned/arbitrary
+   //          track tables
+   //   - >23: ground frames are serialized explicitly
+   //
+   struct LegacyKeyframe
+   {
+      int32_t firstNodeState = 0;
+      int32_t firstObjectState = 0;
+      int32_t firstDecalState = 0;
+   };
+
+   template<typename T> static void transposeLegacyTrackBlock(std::vector<T>& data, size_t start, size_t numKeyFrames, size_t numTracks)
+   {
+      if (start >= data.size() || numKeyFrames == 0 || numTracks == 0)
+         return;
+
+      const size_t totalCount = numKeyFrames * numTracks;
+      if (start + totalCount > data.size())
+         return;
+
+      std::vector<T> copy(totalCount);
+      std::memcpy(copy.data(), data.data() + start, totalCount * sizeof(T));
+      for (size_t frame = 0; frame < numKeyFrames; ++frame)
+      {
+         for (size_t track = 0; track < numTracks; ++track)
+         {
+            data[start + (track * numKeyFrames) + frame] = copy[(frame * numTracks) + track];
+         }
+      }
+   }
+
+   static bool readLegacyMesh(Mesh* mesh, Shape* shape, MemRStream& stream, uint32_t version)
+   {
+      if (!mesh)
+         return false;
+
+      uint32_t sz = 0;
+      int32_t ssz = 0;
+
+      mesh->mData = NULL;
+      if (mesh->mType == Mesh::T_Null)
+         return false;
+
+      BasicData* basicData = NULL;
+      SkinData* skinData = NULL;
+      SortedData* sortedData = NULL;
+      DecalData* decalData = NULL;
+
+      if (mesh->mType == Mesh::T_Skin)
+      {
+         mesh->mData = std::make_shared<SkinData>();
+         skinData = (SkinData*)mesh->mData.get();
+         basicData = (BasicData*)mesh->mData.get();
+      }
+      else if (mesh->mType == Mesh::T_Sorted)
+      {
+         mesh->mData = std::make_shared<SortedData>();
+         sortedData = (SortedData*)mesh->mData.get();
+         basicData = (BasicData*)mesh->mData.get();
+      }
+      else if (mesh->mType == Mesh::T_Decal)
+      {
+         mesh->mData = std::make_shared<DecalData>();
+         decalData = (DecalData*)mesh->mData.get();
+      }
+      else
+      {
+         mesh->mData = std::make_shared<BasicData>();
+         basicData = (BasicData*)mesh->mData.get();
+      }
+
+      struct LegacyBasePayload
+      {
+         std::vector<slm::vec3> verts;
+         std::vector<slm::vec2> tverts;
+         std::vector<slm::vec3> normals;
+         std::vector<Primitive> primitives;
+         std::vector<uint16_t> indices;
+      } payload;
+
+      // Common mesh header and vertex/index payload.
+      if (version < 18)
+      {
+         int32_t i32 = 0;
+
+         if (!stream.read(mesh->mNumFrames) ||
+             !stream.read(mesh->mNumMatFrames))
+            return false;
+
+         mesh->mParent = -1;
+
+         if (!stream.read(sz))
+            return false;
+         payload.verts.resize(sz);
+         for (slm::vec3& vert : payload.verts)
+         {
+            if (!readPoint3F(stream, vert))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         payload.tverts.resize(sz);
+         for (slm::vec2& vert : payload.tverts)
+         {
+            if (!readPoint2F(stream, vert))
+               return false;
+         }
+
+         if (!stream.read(ssz) || ssz < 0)
+            return false;
+         payload.normals.resize((size_t)ssz);
+         for (slm::vec3& vert : payload.normals)
+         {
+            if (!readPoint3F(stream, vert))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         payload.primitives.resize(sz);
+         for (Primitive& prim : payload.primitives)
+         {
+            if (!stream.read(prim.firstElement) ||
+                !stream.read(prim.numElements) ||
+                !stream.read(i32))
+               return false;
+            prim.matIndex = (Primitive::Type)i32;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         payload.indices.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            uint32_t idx = 0;
+            if (!stream.read(idx))
+               return false;
+            payload.indices[i] = (uint16_t)idx;
+         }
+
+         uint32_t mergeCount = 0;
+         if (!stream.read(mergeCount))
+            return false;
+         for (uint32_t i = 0; i < mergeCount; ++i)
+         {
+            uint16_t dummy = 0;
+            if (!stream.read(dummy))
+               return false;
+         }
+
+         if (!stream.read(mesh->mVertsPerFrame) ||
+             !stream.read(mesh->mFlags))
+            return false;
+      }
+      else
+      {
+         if (!stream.read(mesh->mNumFrames) ||
+             !stream.read(mesh->mNumMatFrames))
+            return false;
+
+         mesh->mParent = -1;
+
+         uint32_t numVerts = 0;
+         uint32_t numTVerts = 0;
+
+         if (mesh->mParent < 0)
+         {
+            if (!stream.read(numVerts))
+               return false;
+            payload.verts.resize(numVerts);
+            for (slm::vec3& vert : payload.verts)
+            {
+               if (!readPoint3F(stream, vert))
+                  return false;
+            }
+         }
+         else
+         {
+            if (!stream.read(numVerts))
+               return false;
+         }
+
+         if (mesh->mParent < 0)
+         {
+            if (!stream.read(numTVerts))
+               return false;
+            payload.tverts.resize(numTVerts);
+            for (slm::vec2& vert : payload.tverts)
+            {
+               if (!readPoint2F(stream, vert))
+                  return false;
+            }
+         }
+         else
+         {
+            if (!stream.read(numTVerts))
+               return false;
+         }
+
+         if (mesh->mParent < 0)
+         {
+            payload.normals.resize(payload.verts.size());
+            for (slm::vec3& vert : payload.normals)
+            {
+               if (!readPoint3F(stream, vert))
+                  return false;
+            }
+
+            if (version > 21)
+            {
+               for (slm::vec3& vert : payload.normals)
+               {
+                  uint8_t discard = 0;
+                  if (!stream.read(discard))
+                     return false;
+               }
+            }
+         }
+
+         if (!stream.read(sz))
+            return false;
+         payload.primitives.resize(sz);
+         for (Primitive& prim : payload.primitives)
+         {
+            if (!readPrimitive(stream, prim))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         payload.indices.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            uint16_t idx = 0;
+            if (!stream.read(idx))
+               return false;
+            payload.indices[i] = idx;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            // The old format stores merge indices separately, but they are not
+            // used by the viewer path. Consume them and keep the vector empty.
+            uint16_t discard = 0;
+            if (!stream.read(discard))
+               return false;
+         }
+
+         if (!stream.read(mesh->mVertsPerFrame) ||
+             !stream.read(mesh->mFlags))
+            return false;
+      }
+
+      if (basicData)
+      {
+         basicData->verts = std::move(payload.verts);
+         basicData->tverts = std::move(payload.tverts);
+         basicData->normals = std::move(payload.normals);
+         basicData->primitives = std::move(payload.primitives);
+         basicData->indices = std::move(payload.indices);
+         basicData->mergeIndices.clear();
+      }
+
+      // Skin-specific tail. The old format stores the bind/rest pose plus the
+      // per-vertex influence lists after the common mesh payload.
+      if (skinData)
+      {
+         uint32_t numVerts = 0;
+         if (!stream.read(numVerts))
+            return false;
+         skinData->verts.resize(numVerts);
+         for (slm::vec3& vert : skinData->verts)
+         {
+            if (!readPoint3F(stream, vert))
+               return false;
+         }
+
+         if (!stream.read(ssz) || ssz < 0)
+            return false;
+         skinData->normals.resize((size_t)ssz);
+         for (slm::vec3& vert : skinData->normals)
+         {
+            if (!readPoint3F(stream, vert))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         skinData->nodeTransforms.resize(sz);
+         for (slm::mat4& mat : skinData->nodeTransforms)
+         {
+            if (!readMatrixF(stream, mat))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         skinData->vindex.resize(sz);
+         skinData->bindex.resize(sz);
+         skinData->vweight.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(skinData->vindex[i]) ||
+                !stream.read(skinData->bindex[i]) ||
+                !stream.read(skinData->vweight[i]))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         skinData->nodeIndex.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(skinData->nodeIndex[i]))
+               return false;
+         }
+      }
+      else if (decalData)
+      {
+         // Legacy decals still carry a common mesh payload in the file. It is
+         // consumed above for stream alignment and then discarded here.
+         (void)decalData;
+      }
+      else if (sortedData)
+      {
+         if (!stream.read(sz))
+            return false;
+         sortedData->clusters.resize(sz);
+         for (Cluster& cluster : sortedData->clusters)
+         {
+            if (!readCluster(stream, cluster))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         sortedData->startCluster.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(sortedData->startCluster[i]))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         sortedData->firstVerts.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(sortedData->firstVerts[i]))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         sortedData->numVerts.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(sortedData->numVerts[i]))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         sortedData->firstTVerts.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(sortedData->firstTVerts[i]))
+               return false;
+         }
+
+         uint32_t alwaysWriteDepth = 0;
+         if (!stream.read(alwaysWriteDepth))
+            return false;
+         sortedData->alwaysWriteDepth = alwaysWriteDepth != 0;
+      }
+
+      if (basicData)
+      {
+         mesh->calculateBounds();
+         mesh->calculateCenter();
+         mesh->setRadius(mesh->calculateRadius());
+      }
+      else if (mesh->mType == Mesh::T_Decal)
+      {
+         mesh->setBounds(Box());
+         mesh->setCenter(slm::vec3(0.0f));
+         mesh->setRadius(0.0f);
+      }
+      return true;
+   }
+
+   static bool readLegacyUnifiedShape(Shape* shape, MemRStream& stream, uint32_t version)
+   {
+      // ===== Legacy unified stream reader (v<19) =====
+      // This mirrors the old single-stream layout used by pre-split DTS files.
+      // The modern split reader stays untouched for v>=19.
+
+      if (!shape)
+         return false;
+
+      uint32_t hdr[4] = {};
+      if (!stream.read(sizeof(hdr), hdr))
+         return false;
+      if ((hdr[0] & 0xFF) != version)
+         return false;
+
+      shape->mRuntimeFlags = 0;
+      shape->mIflMaterialsInitialized = false;
+      shape->mExportMerge = false;
+      shape->mIflFrameTimes.clear();
+      shape->mNameTable = NameTable();
+
+      uint32_t numNodes = 0;
+      uint32_t numObjects = 0;
+      uint32_t numDecals = 0;
+      uint32_t numSubShapes = 0;
+      uint32_t numIflMaterials = 0;
+      uint32_t numNodeStates = 0;
+      uint32_t numObjectStates = 0;
+      uint32_t numDecalStates = 0;
+      uint32_t numTriggers = 0;
+      uint32_t numDetails = 0;
+      uint32_t numMeshes = 0;
+      uint32_t numSkins = 0;
+      uint32_t numNames = 0;
+
+      if (!stream.read(shape->mRadius) ||
+          !stream.read(shape->mTubeRadius) ||
+          !readPoint3F(stream, shape->mCenter) ||
+          !readBox(stream, shape->mBounds))
+         return false;
+
+      if (!stream.read(numNodes) ||
+          !stream.read(numObjects) ||
+          !stream.read(numDecals) ||
+          !stream.read(numSubShapes) ||
+          !stream.read(numIflMaterials))
+         return false;
+
+      // Nodes: on-disk legacy layout is name + parent, with an obsolete bool
+      // member present before v17.
+      shape->mNodes.resize(numNodes);
+      for (uint32_t i = 0; i < numNodes; ++i)
+      {
+         Node& node = shape->mNodes[i];
+         if (!stream.read(node.name) ||
+             !stream.read(node.parent))
+            return false;
+         if (version < 17)
+         {
+            bool obsolete = false;
+            if (!stream.read(obsolete))
+               return false;
+         }
+         node.resetRuntime();
+      }
+
+      // Objects: name, numMeshes, firstMesh, node, with runtime fields added
+      // after load.
+      shape->mObjects.resize(numObjects);
+      for (uint32_t i = 0; i < numObjects; ++i)
+      {
+         Object& obj = shape->mObjects[i];
+         if (!stream.read(obj.name) ||
+             !stream.read(obj.numMeshes) ||
+             !stream.read(obj.firstMesh) ||
+             !stream.read(obj.node))
+            return false;
+         obj.nextSibling = -1;
+         obj.firstDecal = -1;
+      }
+
+      // Decals: name, numMeshes, firstMesh, object, plus runtime sibling info.
+      shape->mDecals.resize(numDecals);
+      for (uint32_t i = 0; i < numDecals; ++i)
+      {
+         Decal& decal = shape->mDecals[i];
+         if (!stream.read(decal.name) ||
+             !stream.read(decal.numMeshes) ||
+             !stream.read(decal.firstMesh) ||
+             !stream.read(decal.object))
+            return false;
+         decal.nextSibling = -1;
+      }
+
+      // IFL materials: legacy files store only name + slot.
+      shape->mIflMaterials.resize(numIflMaterials);
+      for (uint32_t i = 0; i < numIflMaterials; ++i)
+      {
+         IflMaterial& ifl = shape->mIflMaterials[i];
+         if (!stream.read(ifl.name) ||
+             !stream.read(ifl.slot))
+            return false;
+         ifl.firstFrame = ifl.slot;
+         ifl.time = 0.0f;
+         ifl.numFrames = 0;
+      }
+
+      // Subshapes.
+      shape->mSubshapes.resize(numSubShapes);
+      for (SubShape& subShape : shape->mSubshapes)
+      {
+         subShape.firstTranslucent = -1;
+      }
+      for (SubShape& subShape : shape->mSubshapes)
+      {
+         if (!stream.read(subShape.firstNode))
+            return false;
+      }
+      {
+         int32_t discard = 0;
+         if (!stream.read(discard))
+            return false;
+      }
+      for (SubShape& subShape : shape->mSubshapes)
+      {
+         if (!stream.read(subShape.firstObject))
+            return false;
+      }
+      {
+         int32_t discard = 0;
+         if (!stream.read(discard))
+            return false;
+      }
+      for (SubShape& subShape : shape->mSubshapes)
+      {
+         if (!stream.read(subShape.firstDecal))
+            return false;
+      }
+
+      int32_t prev = (int32_t)numNodes;
+      for (int32_t i = (int32_t)numSubShapes - 1; i >= 0; --i)
+      {
+         const int32_t first = shape->mSubshapes[(size_t)i].firstNode;
+         shape->mSubshapes[(size_t)i].numNodes = prev - first;
+         prev = first;
+      }
+
+      prev = (int32_t)numObjects;
+      for (int32_t i = (int32_t)numSubShapes - 1; i >= 0; --i)
+      {
+         const int32_t first = shape->mSubshapes[(size_t)i].firstObject;
+         shape->mSubshapes[(size_t)i].numObjects = prev - first;
+         prev = first;
+      }
+
+      prev = (int32_t)numDecals;
+      for (int32_t i = (int32_t)numSubShapes - 1; i >= 0; --i)
+      {
+         const int32_t first = shape->mSubshapes[(size_t)i].firstDecal;
+         shape->mSubshapes[(size_t)i].numDecals = prev - first;
+         prev = first;
+      }
+
+      // Optional pre-v16 mesh remap table.
+      if (version < 16)
+      {
+         uint32_t meshIndexCount = 0;
+         if (!stream.read(meshIndexCount))
+            return false;
+         for (uint32_t i = 0; i < meshIndexCount; ++i)
+         {
+            uint32_t discard = 0;
+            if (!stream.read(discard))
+               return false;
+         }
+      }
+
+      // Optional pre-v17 keyframes. These get transposed into track-major
+      // layout once the sequence list has been loaded.
+      std::vector<LegacyKeyframe> legacyKeyframes;
+      if (version < 17)
+      {
+         uint32_t keyframeCount = 0;
+         if (!stream.read(keyframeCount))
+            return false;
+         legacyKeyframes.resize(keyframeCount);
+         for (LegacyKeyframe& keyframe : legacyKeyframes)
+         {
+            if (!stream.read(keyframe.firstNodeState) ||
+                !stream.read(keyframe.firstObjectState) ||
+                !stream.read(keyframe.firstDecalState))
+               return false;
+         }
+      }
+
+      // Node/object/decal state blocks.
+      if (!stream.read(numNodeStates))
+         return false;
+      shape->mNodeRotations.resize(numNodeStates);
+      shape->mNodeTranslations.resize(numNodeStates);
+      for (uint32_t i = 0; i < numNodeStates; ++i)
+      {
+         if (!readQuat16(stream, shape->mNodeRotations[i]) ||
+             !readPoint3F(stream, shape->mNodeTranslations[i]))
+            return false;
+      }
+
+      if (!stream.read(numObjectStates))
+         return false;
+      shape->mObjectStates.resize(numObjectStates);
+      for (ObjectState& state : shape->mObjectStates)
+      {
+         if (!readObjectState(stream, state))
+            return false;
+      }
+
+      if (!stream.read(numDecalStates))
+         return false;
+      if (version < 14)
+      {
+         shape->mDecalStates.resize((size_t)numDecals + numDecalStates, DecalState(-1));
+         for (uint32_t i = 0; i < numDecalStates; ++i)
+         {
+            if (!readDecalState(stream, shape->mDecalStates[(size_t)numDecals + i]))
+               return false;
+         }
+      }
+      else
+      {
+         shape->mDecalStates.resize(numDecalStates);
+         for (DecalState& state : shape->mDecalStates)
+         {
+            if (!readDecalState(stream, state))
+               return false;
+         }
+      }
+
+      if (!stream.read(numTriggers))
+         return false;
+      shape->mTriggers.resize(numTriggers);
+      for (Trigger& trigger : shape->mTriggers)
+      {
+         if (!readTrigger(stream, trigger))
+            return false;
+      }
+
+      if (!stream.read(numDetails))
+         return false;
+      shape->mDetailLevels.resize(numDetails);
+      for (DetailLevel& detail : shape->mDetailLevels)
+      {
+         if (!readDetailLevel(stream, detail))
+            return false;
+      }
+
+      // Sequences are stored before the mesh/name/material tails in legacy
+      // unified files.
+      uint32_t numSequences = 0;
+      if (!stream.read(numSequences))
+         return false;
+      shape->mSequences.resize(numSequences);
+      for (Sequence& seq : shape->mSequences)
+      {
+         if (!seq.readSerialized(stream, (int)version, true, nullptr, false))
+            return false;
+      }
+
+      if (!stream.read(numMeshes))
+         return false;
+      shape->mMeshes.resize((size_t)numMeshes + numSkins);
+      for (uint32_t i = 0; i < numMeshes; ++i)
+      {
+         Mesh& mesh = shape->mMeshes[i];
+         uint32_t meshType = 0;
+         if (!stream.read(meshType))
+            return false;
+         mesh.setType((Mesh::Type)meshType);
+         if (!readLegacyMesh(&mesh, shape, stream, version))
+            return false;
+      }
+
+      if (!stream.read(numNames))
+         return false;
+      for (uint32_t i = 0; i < numNames; ++i)
+      {
+         int32_t len = 0;
+         if (!stream.read(len) || len < 0)
+            return false;
+         std::string name;
+         name.resize((size_t)len);
+         if (len > 0 && !stream.read((uint64_t)len, name.data()))
+            return false;
+         shape->mNameTable.addString(name);
+      }
+
+      bool gotMaterialList = false;
+      if (!stream.read(gotMaterialList))
+         return false;
+      if (gotMaterialList)
+      {
+         shape->mMaterials.mVariant = MaterialList::VARIANT_TS;
+         if (!shape->mMaterials.read(stream))
+            return false;
+      }
+
+      // Skin tail + detail-to-skin remap.
+      if (!stream.read(numSkins))
+         return false;
+      for (uint32_t i = 0; i < numSkins; ++i)
+      {
+         Mesh& mesh = shape->mMeshes[numMeshes + i];
+         mesh.setType(Mesh::T_Skin);
+         if (!readLegacyMesh(&mesh, shape, stream, version))
+            return false;
+      }
+
+      std::vector<int32_t> detailFirstSkin(numDetails, 0);
+      std::vector<int32_t> detailNumSkins(numDetails, 0);
+      if (numSkins > 0 && numDetails > 0)
+      {
+         if (!stream.read((uint32_t)detailFirstSkin.size(), detailFirstSkin.data()))
+            return false;
+
+         int32_t prev = (int32_t)numSkins;
+         for (int32_t i = (int32_t)numDetails - 1; i >= 0; --i)
+         {
+            const int32_t first = detailFirstSkin[(size_t)i];
+            detailNumSkins[(size_t)i] = prev - first;
+            prev = first;
+         }
+      }
+
+      if (numSkins > 0)
+         correctPreV32Skins(shape, detailFirstSkin, detailNumSkins, numMeshes, numSkins, numDetails);
+
+      if (version < 17)
+      {
+         const int32_t skinObjectShift = (int32_t)shape->mObjects.size() - (int32_t)numObjects;
+         for (uint32_t seqIdx = 0; seqIdx < shape->mSequences.size(); ++seqIdx)
+         {
+            Sequence& seq = shape->mSequences[seqIdx];
+
+            int32_t numNodeTracks = 0;
+            int32_t numObjectTracks = 0;
+            int32_t numDecalTracks = 0;
+            for (int32_t j = 0; j < IntegerSetBits; ++j)
+            {
+               if (seq.mattersRot.test(j))
+                  ++numNodeTracks;
+
+               if (seq.mattersVis.test(j) || seq.mattersFrame.test(j) || seq.mattersMatframe.test(j))
+                  ++numObjectTracks;
+
+               if (seq.mattersDecal.test(j))
+                  ++numDecalTracks;
+            }
+
+            if (seq.numKeyFrames > 0)
+            {
+               const int32_t keyframeStart = (seqIdx < legacyKeyframes.size()) ? legacyKeyframes[seqIdx].firstNodeState : 0;
+               seq.baseRot = numNodeTracks ? keyframeStart : 0;
+               seq.baseTrans = numNodeTracks ? keyframeStart : 0;
+               seq.baseObjectState = numObjectTracks ? (((seqIdx < legacyKeyframes.size()) ? legacyKeyframes[seqIdx].firstObjectState : 0) + skinObjectShift) : skinObjectShift;
+               seq.baseDecalState = numDecalTracks ? ((seqIdx < legacyKeyframes.size()) ? legacyKeyframes[seqIdx].firstDecalState : 0) : 0;
+
+               transposeLegacyTrackBlock(shape->mNodeRotations, (size_t)seq.baseRot, (size_t)seq.numKeyFrames, (size_t)numNodeTracks);
+               transposeLegacyTrackBlock(shape->mNodeTranslations, (size_t)seq.baseTrans, (size_t)seq.numKeyFrames, (size_t)numNodeTracks);
+               transposeLegacyTrackBlock(shape->mObjectStates, (size_t)seq.baseObjectState, (size_t)seq.numKeyFrames, (size_t)numObjectTracks);
+               transposeLegacyTrackBlock(shape->mDecalStates, (size_t)seq.baseDecalState, (size_t)seq.numKeyFrames, (size_t)numDecalTracks);
+            }
+         }
+      }
+
+      resolveMeshParents(shape);
+      if (!triangulateShapePrimitives(shape))
+         return false;
+
+      shape->mPreviousMerge.clear();
+      shape->mPreviousMerge.resize(shape->mObjects.size(), -1);
+
+      return stream.mPos == stream.mSize;
+   }
+
    template<typename T> static bool readShape(Shape* shape, T& ds)
    {
       // Reading sequences
