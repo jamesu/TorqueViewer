@@ -849,6 +849,7 @@ public:
    int32_t mAlwaysNode;
    int32_t mCurrentDetail;
    uint32_t mTriggerStateFlags;
+   bool mDebugRenderDecals;
    
    std::vector<bool> mThreadActive;
    uint32_t mBaseTextureTransform;
@@ -971,6 +972,7 @@ public:
       mShape = NULL;
       mResourceManager = res;
       initVB = false;
+      mDebugRenderDecals = false;
    }
    
    ~ShapeViewer()
@@ -2414,9 +2416,11 @@ public:
                if (!checkSet.test(dci))
                {
                   int32_t keyNum = thread.keyInfo.keyPos < 0.5f ? thread.keyInfo.keyA : thread.keyInfo.keyB;
-                  mRuntimeDecalInfos[dci].mFrame = mShape->getSequenceDecalState(sequence, keyNum, decalFrame++).frame;
+                  mRuntimeDecalInfos[dci].mFrame = mShape->getSequenceDecalState(sequence, keyNum, decalFrame).frame;
                   checkSet.set(dci, true);
                }
+
+               decalFrame++;
             }
          }
       });
@@ -2518,6 +2522,7 @@ public:
       {
          Dts3::Decal& d = mShape->mDecals[i];
          int32_t objectIdx = d.object;
+         d.nextSibling = -1;
       
          if (mShape->mObjects[objectIdx].firstDecal < 0)
          {
@@ -2530,7 +2535,7 @@ public:
             {
                decalIdx = mShape->mDecals[decalIdx].nextSibling;
             }
-            mShape->mObjects[objectIdx].nextSibling = i;
+            mShape->mDecals[decalIdx].nextSibling = i;
          }
       }
       
@@ -2562,6 +2567,7 @@ public:
 
       std::vector<RuntimeMeshInfo*> skinMeshList;
       std::vector<RuntimeMeshInfo*> basicMeshList;
+      std::vector<RuntimeMeshInfo*> decalMeshList;
       
       // Load meshes
       uint32_t vertCount = 0;
@@ -2589,6 +2595,14 @@ public:
             basicMeshList.push_back(&rm);
             rm.mUseSkinData = false;
          }
+         else if (Dts3::DecalData* dd = rm.mMesh->getDecalData())
+         {
+            rm.mVertCount = 0;
+            rm.mIndexCount = (uint32_t)dd->indices.size();
+            indexCount += dd->indices.size();
+            decalMeshList.push_back(&rm);
+            rm.mUseSkinData = false;
+         }
          
          if (bd)
          {
@@ -2600,7 +2614,8 @@ public:
          else
          {
             rm.mRealVertsPerFrame = 0;
-            rm.mIndexCount = 0;
+            if (!rm.mMesh->getDecalData())
+               rm.mIndexCount = 0;
          }
 
          rm.mSkinVertOffset = 0;
@@ -2654,6 +2669,19 @@ public:
          rm->mIndexOffset = indexCount;
          rm->mSkinVertOffset = 0;
          vertCount += rm->mVertCount;
+         indexCount += rm->mIndexCount;
+      }
+
+      for (RuntimeMeshInfo* rm : decalMeshList)
+      {
+         Dts3::DecalData* dd = rm->mMesh->getDecalData();
+         if (!dd)
+            continue;
+
+         memcpy(&packed.indices[indexCount], dd->indices.data(), sizeof(uint16_t) * dd->indices.size());
+         rm->mVertOffset = 0;
+         rm->mIndexOffset = indexCount;
+         rm->mSkinVertOffset = 0;
          indexCount += rm->mIndexCount;
       }
    }
@@ -2890,8 +2918,9 @@ public:
       if (mi.mMesh != NULL)
       {
          const uint32_t numMeshFrames = std::max<uint32_t>(mi.mMesh->mNumFrames, 1);
+         const uint32_t numTexFrames = std::max<uint32_t>(mi.mMesh->mNumMatFrames, 1);
          mi.mMeshFrame = (uint32_t)std::clamp(ri.mLastMeshframe, 0, (int32_t)numMeshFrames - 1);
-         mi.mMeshTexFrame = mi.mMeshFrame;
+         mi.mMeshTexFrame = std::min<uint32_t>(mi.mMeshFrame, numTexFrames - 1);
       }
       else
       {
@@ -2951,13 +2980,60 @@ public:
       }
       else
       {
-         Dts3::DecalData* dd = mi.mMesh->getDecalData();
-         if (dd)
-         {
-            RuntimeMeshInfo& smi = mRuntimeMeshInfos[dd->meshIndex];
-            renderDecal(mi, smi, ri, bd, dd);
-         }
+         // Decal meshes are rendered in the dedicated subshape decal pass.
+         return;
       }
+   }
+
+   void renderDecalObject(uint32_t decalIndex, uint32_t meshNum)
+   {
+      if (decalIndex >= mShape->mDecals.size() || decalIndex >= mRuntimeDecalInfos.size())
+         return;
+
+      Dts3::Decal& decal = mShape->mDecals[decalIndex];
+      if (decal.numMeshes <= 0)
+         return;
+      if (decal.object < 0 || decal.object >= mShape->mObjects.size())
+         return;
+
+      Dts3::Object& targetObject = mShape->mObjects[decal.object];
+      if (targetObject.numMeshes <= 0)
+         return;
+
+      const uint32_t maxSharedMeshSlot = (uint32_t)std::min(decal.numMeshes, targetObject.numMeshes);
+      if (maxSharedMeshSlot == 0)
+         return;
+
+      meshNum = std::min<uint32_t>(meshNum, maxSharedMeshSlot - 1);
+
+      const uint32_t decalMeshIndex = decal.firstMesh + meshNum;
+      const uint32_t targetMeshIndex = targetObject.firstMesh + meshNum;
+      if (decalMeshIndex >= mRuntimeMeshInfos.size() || targetMeshIndex >= mRuntimeMeshInfos.size())
+         return;
+
+      RuntimeMeshInfo& decalMeshInfo = mRuntimeMeshInfos[decalMeshIndex];
+      RuntimeMeshInfo& targetMeshInfo = mRuntimeMeshInfos[targetMeshIndex];
+      RuntimeObjectInfo& targetObjectInfo = mRuntimeObjectInfos[decal.object];
+      if (!targetObjectInfo.mDraw || targetObjectInfo.mLastVis <= 0.0f)
+         return;
+
+      Dts3::DecalData* decalData = decalMeshInfo.mMesh ? decalMeshInfo.mMesh->getDecalData() : NULL;
+      if (!decalData)
+         return;
+
+      const uint32_t decalFrameCount = (uint32_t)std::min(decalData->startPrimitive.size(),
+                                                           std::min(decalData->texGenS.size(), decalData->texGenT.size()));
+      if (decalFrameCount == 0)
+         return;
+
+      const int32_t runtimeDecalFrame = mRuntimeDecalInfos[decalIndex].mFrame;
+      if (runtimeDecalFrame < 0 || runtimeDecalFrame >= (int32_t)decalFrameCount)
+         return;
+
+      decalMeshInfo.mMeshFrame = (uint32_t)runtimeDecalFrame;
+      decalMeshInfo.mMeshTexFrame = decalMeshInfo.mMeshFrame;
+
+      renderDecal(decalMeshInfo, targetMeshInfo, targetObjectInfo, NULL, decalData);
    }
    
    ModelPipelineState calcPipelineState(uint32_t flags) const
@@ -3040,10 +3116,23 @@ public:
           mi.mMeshFrame >= dd->texGenT.size())
          return;
 
+      if (smi.mMesh != NULL)
+      {
+         const uint32_t numTargetMeshFrames = std::max<uint32_t>(smi.mMesh->mNumFrames, 1);
+         const uint32_t numTargetTexFrames = std::max<uint32_t>(smi.mMesh->mNumMatFrames, 1);
+         smi.mMeshFrame = (uint32_t)std::clamp(ri.mLastMeshframe, 0, (int32_t)numTargetMeshFrames - 1);
+         smi.mMeshTexFrame = std::min<uint32_t>(smi.mMeshFrame, numTargetTexFrames - 1);
+      }
+      else
+      {
+         smi.mMeshFrame = 0;
+         smi.mMeshTexFrame = 0;
+      }
+
       const uint32_t meshVertOffset = smi.mVertOffset + (smi.mMeshFrame * smi.mRealVertsPerFrame);
       const uint32_t meshTexOffset = smi.mVertOffset + (smi.mMeshTexFrame * smi.mRealVertsPerFrame);
       const uint32_t meshSkinOffset = smi.mSkinVertOffset + (smi.mUseSkinData ? (smi.mMeshFrame * smi.mRealVertsPerFrame) : 0);
-      GFXSetModelVerts(0, meshVertOffset, meshTexOffset, smi.mIndexOffset, meshSkinOffset);
+      GFXSetModelVerts(0, meshVertOffset, meshTexOffset, mi.mIndexOffset, meshSkinOffset);
       GFXSetModelViewProjection(mModelMatrix, mViewMatrix, mProjectionMatrix, smi.mRenderFlags);
       
       uint32_t start = dd->startPrimitive[mi.mMeshFrame];
@@ -3069,7 +3158,13 @@ public:
             currentGroupID = binding.textureGroupID;
             haveBoundState = true;
          }
-         GFXSetTSPipelineProps(binding.materialFrame, smi.mMeshTransformOffset, dd->texGenS[mi.mMeshFrame], dd->texGenT[mi.mMeshFrame]);
+         GFXSetTSPipelineProps(binding.materialFrame,
+                              smi.mMeshTransformOffset,
+                              dd->texGenS[mi.mMeshFrame],
+                              dd->texGenT[mi.mMeshFrame],
+                              mDebugRenderDecals,
+                              slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
+                              1.0e-4f);
          
          assert(drawMode == Dts3::Primitive::Triangles);
          
@@ -3157,6 +3252,11 @@ public:
       {
          renderObject(i, level.objectDetail);
       }
+
+      for (uint32_t i=ss.firstDecal; i<ss.firstDecal+ss.numDecals; i++)
+      {
+         renderDecalObject(i, level.objectDetail);
+      }
    }
    
    void renderNodes(int32_t nodeIdx, slm::vec3 parentPos, int32_t highlightIdx)
@@ -3211,6 +3311,7 @@ public:
    int32_t mRemoveThreadId;
    bool mRenderNodes;
    bool mManualThreads;
+   bool mDebugRenderDecals;
    
    ShapeViewerController(SDL_Window* window, ResManager* mgr) :
    mViewer(mgr)
@@ -3228,6 +3329,7 @@ public:
       mRemoveThreadId = -1;
       mRenderNodes = true;
       mManualThreads = false;
+      mDebugRenderDecals = false;
    }
    
    ~ShapeViewerController()
@@ -3731,6 +3833,7 @@ public:
       int w, h;
       SDL_GetWindowSize(mWindow, &w, &h);
       mViewer.mProjectionMatrix = slm::perspective_fov_rh( slm::radians(90.0), (float)w/(float)h, 0.01f, 10000.0f);
+      mViewer.mDebugRenderDecals = mDebugRenderDecals;
       
       if (!mManualThreads)
          mViewer.advanceThreads(dt);
@@ -3836,6 +3939,7 @@ public:
          mDetailDist = (float)detailSelection;
       }
       ImGui::Checkbox("Render Nodes", &mRenderNodes);
+      ImGui::Checkbox("Debug Render Decals", &mDebugRenderDecals);
       ImGui::End();
 
       renderMaterialDebugWindow();

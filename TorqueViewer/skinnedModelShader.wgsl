@@ -114,6 +114,9 @@ fn mainVert(input: VertexInput) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = commonUniforms.projMat * commonUniforms.viewMat * worldPos;
+    if (commonUniforms.params2.w != 0.0) {
+        output.position.z -= commonUniforms.params2.w * output.position.w;
+    }
     if (commonUniforms.params2.y > 0.5) {
         let p = vec4<f32>(skinnedPos, 1.0);
         let texgenS = commonUniforms.squareTexCoords[0];
@@ -128,6 +131,12 @@ fn mainVert(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn mainFrag(input: VertexOutput) -> FragmentOutput {
+    if (commonUniforms.params2.z > 0.5) {
+        var debugOut: FragmentOutput;
+        debugOut.Color = commonUniforms.squareTexCoords[2];
+        return debugOut;
+    }
+
     let texColor = textureSample(diffuseTex, diffuseSampler, input.vTexCoord0);
 
     //if (texColor.a < commonUniforms.params2.x) {
