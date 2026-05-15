@@ -58,6 +58,76 @@ namespace fs = std::filesystem;
 static const uint32_t TVMaxBuffersInFlight = 3;
 static const slm::mat4 kTorqueZUpViewBasis = slm::rotation_x(slm::radians(-90.0f));
 
+static bool readDTSHeaderVersion(const fs::path& path, uint32_t& outRawHeader, uint32_t& outVersion, uint32_t& outExporterVersion)
+{
+   std::ifstream stream(path.string(), std::ios::binary);
+   if (!stream.is_open())
+      return false;
+
+   uint32_t header = 0;
+   stream.read(reinterpret_cast<char*>(&header), sizeof(header));
+   if (!stream || stream.gcount() != sizeof(header))
+      return false;
+
+   outRawHeader = header;
+   outVersion = header & 0xFF;
+   outExporterVersion = (header >> 16) & 0xFFFF;
+   return true;
+}
+
+static int scanDTSVersions(const fs::path& rootPath)
+{
+   if (!fs::exists(rootPath))
+   {
+      fprintf(stderr, "--scan-dts-version path does not exist: %s\n", rootPath.string().c_str());
+      return 1;
+   }
+
+   std::vector<fs::path> dtsFiles;
+   if (fs::is_regular_file(rootPath))
+   {
+      std::string ext = rootPath.extension().string();
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+      if (ext == ".dts")
+         dtsFiles.push_back(rootPath);
+   }
+   else if (fs::is_directory(rootPath))
+   {
+      for (const fs::directory_entry& entry : fs::recursive_directory_iterator(rootPath))
+      {
+         if (!entry.is_regular_file())
+            continue;
+         std::string ext = entry.path().extension().string();
+         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+         if (ext == ".dts")
+            dtsFiles.push_back(entry.path());
+      }
+   }
+
+   std::sort(dtsFiles.begin(), dtsFiles.end());
+
+   for (const fs::path& dtsPath : dtsFiles)
+   {
+      uint32_t rawHeader = 0;
+      uint32_t version = 0;
+      uint32_t exporterVersion = 0;
+      if (readDTSHeaderVersion(dtsPath, rawHeader, version, exporterVersion))
+      {
+         std::cout << dtsPath.string()
+                   << " version=" << version
+                   << " exporter=" << exporterVersion
+                   << " raw=0x" << std::hex << rawHeader << std::dec
+                   << "\n";
+      }
+      else
+      {
+         std::cout << dtsPath.string() << " version=<read-failed>\n";
+      }
+   }
+
+   return 0;
+}
+
 // Run of the mill quaternion interpolator
 slm::quat CompatInterpolate( slm::quat const & q1,
                             slm::quat const & q2, float t )
@@ -3724,6 +3794,19 @@ int main(int argc, const char * argv[])
    assert(sizeof(slm::vec2) == 8);
    assert(sizeof(slm::vec3) == 12);
    assert(sizeof(slm::vec4) == 16);
+
+   for (int i = 1; i < argc; ++i)
+   {
+      if (strcmp(argv[i], "--scan-dts-version") == 0)
+      {
+         if (i + 1 >= argc)
+         {
+            fprintf(stderr, "--scan-dts-version requires a path\n");
+            return 1;
+         }
+         return scanDTSVersions(fs::path(argv[i + 1]));
+      }
+   }
    
    ConsolePersistObject::initStatics();
    ResManager::initStatics();

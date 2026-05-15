@@ -1825,7 +1825,7 @@ struct SplitStream
       destStream.write(sz32, buffer8.mPtr);
    }
    
-   void floodFromStream(MemRStream& sourceStream)
+   bool floodFromStream(MemRStream& sourceStream)
    {
       uint32_t hdr[4];
       sourceStream.read(4 * sizeof(int32_t), hdr);
@@ -1834,8 +1834,8 @@ struct SplitStream
       
       if (dtsVersion < 19)
       {
-         assert(false);
-         return;
+         // Don't support these yet
+         return false;
       }
       
       int32_t totalSize = hdr[1];

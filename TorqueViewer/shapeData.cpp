@@ -51,7 +51,10 @@ bool Shape::checkSkip(int meshNumber, int currentObject, int currentDecal, int s
 bool Shape::read(MemRStream& stream)
 {
    SplitStream split;
-   split.floodFromStream(stream);
+   if (!split.floodFromStream(stream))
+   {
+      return false;
+   }
    return IO::readShape(this, split);
 }
 
