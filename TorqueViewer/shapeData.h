@@ -1000,11 +1000,13 @@ public:
    
    // Materials we use
    MaterialList mMaterials;
+   std::vector<float> mIflFrameTimes;
    // Names we use
    NameTable mNameTable;
    
    // Misc
    bool mExportMerge;
+   bool mIflMaterialsInitialized;
    int mSmallestVisibleSize;
    int mSmallestVisibleDetailLevel;
    
@@ -1012,7 +1014,7 @@ public:
    
 public:
    Shape() : mTubeRadius(0), mRadius(0), mExportMerge(false),
-   mSmallestVisibleSize(0), mSmallestVisibleDetailLevel(0) {}
+   mIflMaterialsInitialized(false), mSmallestVisibleSize(0), mSmallestVisibleDetailLevel(0) {}
    
    ~Shape()
    {

@@ -125,6 +125,17 @@ void ConsolePersistObject::initStatics()
 class GenericViewer
 {
 public:
+   static const std::array<const char*, 4>& getKnownTextureExtensions()
+   {
+      static const std::array<const char*, 4> kKnownTextureExtensions = {{
+         ".bmp",
+         ".gif",
+         ".png",
+         ".jpg",
+      }};
+      return kKnownTextureExtensions;
+   }
+
    static std::string normalizeResourceSlashes(std::string path)
    {
       std::replace(path.begin(), path.end(), '\\', '/');
@@ -288,25 +299,11 @@ public:
       fs::path texturePath(normalizedFilename);
       fs::path textureStem = texturePath;
 
-      static const char* kKnownTextureExtensions[] = {
-         ".bmp",
-         ".gif",
-         ".png",
-         ".jpg",
-      };
       std::vector<std::string> extensionsToTry;
       std::string originalExt = texturePath.extension().generic_string();
       std::transform(originalExt.begin(), originalExt.end(), originalExt.begin(), ::tolower);
 
-      bool hasKnownTextureExtension = false;
-      for (const char* knownExt : kKnownTextureExtensions)
-      {
-         if (originalExt == knownExt)
-         {
-            hasKnownTextureExtension = true;
-            break;
-         }
-      }
+      bool hasKnownTextureExtension = hasRecognizedTextureExtension(texturePath);
 
       if (hasKnownTextureExtension)
       {
@@ -315,7 +312,7 @@ public:
       }
       else
       {
-         for (const char* knownExt : kKnownTextureExtensions)
+         for (const char* knownExt : getKnownTextureExtensions())
             extensionsToTry.push_back(knownExt);
       }
 
@@ -432,7 +429,28 @@ public:
       GFXSetModelViewProjection(mModelMatrix, mViewMatrix, mProjectionMatrix);
       GFXSetLightPos(mLightPos, mLightColor);
    }
-   
+
+   static bool hasRecognizedTextureExtension(const fs::path& path)
+   {
+      std::string ext = path.extension().generic_string();
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+      for (const char* knownExt : getKnownTextureExtensions())
+      {
+         if (ext == knownExt)
+            return true;
+      }
+      return false;
+   }
+
+   static std::string trimWhitespace(const std::string& in)
+   {
+      const size_t start = in.find_first_not_of(" \t\r\n");
+      if (start == std::string::npos)
+         return std::string();
+      const size_t end = in.find_last_not_of(" \t\r\n");
+      return in.substr(start, end - start + 1);
+   }
+
    void initMaterials()
    {
       mActiveMaterials.clear();
@@ -743,7 +761,6 @@ public:
    std::vector<RuntimeDetailInfo> mRuntimeDetailInfos;
    std::vector<RuntimeSubShapeInfo> mRuntimeSubShapeInfos;
    std::vector<NodeCallbackInfo> mRuntimeNodeCallbacks;
-   std::vector<float> mIflFrameTimes; // this is per ifl
    
    // NOTE: these are thread references used to handle transitions
    std::vector<int32_t> mNodeRotationThreads;
@@ -922,6 +939,76 @@ public:
       return 1 + mShape->mNodes.size();
    }
 
+   bool initIflMaterials()
+   {
+      if (!mShape || !mResourceManager || mShape->mIflMaterialsInitialized)
+         return true;
+
+      mShape->mIflFrameTimes.clear();
+      mShape->mIflFrameTimes.resize(mShape->mMaterials.size(), 0.0f);
+
+      const fs::path resourceDir = fs::path(normalizeResourceSlashes(mResourceFilename)).parent_path();
+      for (Dts3::IflMaterial& ifl : mShape->mIflMaterials)
+      {
+         ifl.firstFrame = (int32_t)mShape->mMaterials.size();
+         ifl.numFrames = 0;
+
+         std::string iflName = mShape->getName(ifl.name);
+         iflName = normalizeResourceSlashes(iflName);
+         const std::string fullPath = normalizeResourceSlashes((resourceDir / fs::path(iflName)).generic_string());
+
+         MemRStream stream(0, NULL);
+         if (!mResourceManager->openFile(fullPath.c_str(), stream, mResourceMount))
+         {
+            ifl.firstFrame = ifl.slot;
+            continue;
+         }
+
+         float totalTime = 0.0f;
+         std::string contents((const char*)stream.mPtr, (size_t)stream.mSize);
+         std::istringstream lines(contents);
+         std::string line;
+         while (std::getline(lines, line))
+         {
+            std::replace(line.begin(), line.end(), '\t', ' ');
+            line = trimWhitespace(line);
+            if (line.empty())
+               continue;
+
+            std::istringstream lineStream(line);
+            std::string textureName;
+            lineStream >> textureName;
+            if (textureName.empty())
+               continue;
+
+            int durationFrames = 1;
+            if (!(lineStream >> durationFrames) || durationFrames <= 0)
+               durationFrames = 1;
+
+            textureName = normalizeResourceSlashes(textureName);
+            fs::path texturePath(textureName);
+            if (hasRecognizedTextureExtension(texturePath))
+               textureName = normalizeResourceSlashes(texturePath.replace_extension().generic_string());
+
+            MaterialList::Material props = {};
+            if (ifl.slot >= 0 && ifl.slot < (int32_t)mShape->mMaterials.size())
+               props = mShape->mMaterials[(uint32_t)ifl.slot];
+            props.tsProps.flags |= MaterialList::IflFrame;
+            mShape->mMaterials.push_back(textureName.c_str(), &props);
+
+            totalTime += ((float)durationFrames) / 30.0f;
+            mShape->mIflFrameTimes.push_back(totalTime);
+            ifl.numFrames++;
+         }
+
+         if (ifl.numFrames == 0)
+            ifl.firstFrame = ifl.slot;
+      }
+
+      mShape->mIflMaterialsInitialized = true;
+      return true;
+   }
+
    void buildDefaultNodeTransforms()
    {
       const size_t nodeCount = mShape ? mShape->mNodes.size() : 0;
@@ -990,7 +1077,12 @@ public:
          info.mIflMaterial = (uint32_t)i;
          info.mStartFrame = ifl.firstFrame;
          info.mFrame = 0;
-         info.mDuration = ifl.time * (float)ifl.numFrames;
+         if (ifl.numFrames > 0 &&
+             ifl.firstFrame >= 0 &&
+             (size_t)(ifl.firstFrame + ifl.numFrames - 1) < mShape->mIflFrameTimes.size())
+            info.mDuration = mShape->mIflFrameTimes[(size_t)(ifl.firstFrame + ifl.numFrames - 1)];
+         else
+            info.mDuration = 0.0f;
       }
 
       buildDefaultNodeTransforms();
@@ -1392,6 +1484,12 @@ public:
                int32_t firstFrame = iflInfo.firstFrame;
                int32_t numFrames = iflInfo.numFrames;
                float duration = info.mDuration;
+               if (numFrames <= 0 || firstFrame < 0 ||
+                   (size_t)(firstFrame + numFrames - 1) >= mShape->mIflFrameTimes.size())
+               {
+                  info.mFrame = 0;
+                  return false;
+               }
                
                float time = (thread.pos * seq.duration) + seq.toolBegin;
                if (time > duration && duration > 0.0f)
@@ -1401,7 +1499,7 @@ public:
                
                // Lookup frame t1 style
                int32_t frameIdx = 0;
-               for (; frameIdx < numFrames-1 && time > mIflFrameTimes[firstFrame + frameIdx]; frameIdx++);
+               for (; frameIdx < numFrames-1 && time > mShape->mIflFrameTimes[firstFrame + frameIdx]; frameIdx++);
                info.mFrame = frameIdx;
                return false;
             }
@@ -2229,6 +2327,7 @@ public:
       
       mShape = &inShape;
       mMaterialList = &mShape->mMaterials;
+      initIflMaterials();
       
       initShapeObjects();
       
