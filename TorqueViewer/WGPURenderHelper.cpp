@@ -630,21 +630,21 @@ ModelProgramInfo buildModelProgram()
          case ModelPipeline_AdditiveBlend:
             blendState.color.operation = WGPUBlendOperation_Add;
             blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
-            blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blendState.color.dstFactor = WGPUBlendFactor_One;
             
             blendState.alpha.operation = WGPUBlendOperation_Add;
             blendState.alpha.srcFactor = WGPUBlendFactor_One;
-            blendState.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blendState.alpha.dstFactor = WGPUBlendFactor_One;
             colorTargetState.blend = &blendState;
             break;
          case ModelPipeline_SubtractiveBlend:
-            blendState.color.operation = WGPUBlendOperation_Add;
+            blendState.color.operation = WGPUBlendOperation_ReverseSubtract;
             blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
-            blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blendState.color.dstFactor = WGPUBlendFactor_One;
             
             blendState.alpha.operation = WGPUBlendOperation_Add;
             blendState.alpha.srcFactor = WGPUBlendFactor_One;
-            blendState.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blendState.alpha.dstFactor = WGPUBlendFactor_One;
             colorTargetState.blend = &blendState;
             break;
          case ModelPipeline_TranslucentBlend:
@@ -683,7 +683,7 @@ ModelProgramInfo buildModelProgram()
       // Depth stencil state
       WGPUDepthStencilState depthStencilState = {};
       depthStencilState.format = WGPUTextureFormat_Depth32Float;      // Depth format
-      depthStencilState.depthWriteEnabled = WGPUOptionalBoolFromBool(true);                    // Enable depth writing
+      depthStencilState.depthWriteEnabled = WGPUOptionalBoolFromBool(state == ModelPipeline_DefaultDiffuse);                    // Enable depth writing
       depthStencilState.depthCompare = WGPUCompareFunction_Less;     // Use less-than comparison for depth testing
       depthStencilState.stencilFront.compare = WGPUCompareFunction_Always;
       depthStencilState.stencilFront.failOp = WGPUStencilOperation_Keep;
@@ -2497,12 +2497,13 @@ void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID
    //wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 1, info.texBindGroup, 0, NULL);
 }
 
-void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT, bool debugDecal, slm::vec4 debugColor, float clipDepthBias)
+void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT, uint32_t materialFlags, bool debugDecal, slm::vec4 debugColor, float clipDepthBias)
 {
    smState.modelProgram.uniforms.params1.x = (float)transformOffset;
    smState.modelProgram.uniforms.params1.y = 1.0f;
    smState.modelProgram.uniforms.params1.z = 1.0f;
    smState.modelProgram.uniforms.params1.w = (float)matFrame;
+   smState.modelProgram.uniforms.params2.x = (materialFlags & MaterialList::SelfIlluminating) ? 1.0f : 0.0f;
    smState.modelProgram.uniforms.params2.y =
       (slm::length(texGenS) > 0.0f || slm::length(texGenT) > 0.0f) ? 1.0f : 0.0f;
    smState.modelProgram.uniforms.params2.z = debugDecal ? 1.0f : 0.0f;

@@ -138,12 +138,13 @@ fn mainFrag(input: VertexOutput) -> FragmentOutput {
     }
 
     let texColor = textureSample(diffuseTex, diffuseSampler, input.vTexCoord0);
+    let lighting = select(input.vLighting, vec3<f32>(1.0), commonUniforms.params2.x > 0.5);
 
     //if (texColor.a < commonUniforms.params2.x) {
     //    discard;
     //}
 
     var out: FragmentOutput;
-    out.Color = vec4<f32>(texColor.rgba);//vec4<f32>(texColor.rgb /* input.vLighting*/, texColor.a);
+    out.Color = vec4<f32>(texColor.rgb * lighting, texColor.a);
     return out;
 }

@@ -1255,7 +1255,7 @@ public:
                   uint32_t flags = mShape->mMaterials[matIndex].tsProps.flags;
                   if ((flags & MaterialList::AuxiliaryMap) != 0)
                      continue;
-                  if ((flags & MaterialList::Translucent) != 0)
+                  if ((flags & (MaterialList::Translucent | MaterialList::Additive | MaterialList::Subtractive)) != 0)
                   {
                      mShape->mRuntimeFlags |= Dts3::Shape::HasTranslucency;
                      s.firstTranslucent = i;
@@ -2899,6 +2899,7 @@ public:
       if (mCurrentDetail < 0 || mCurrentDetail >= mShape->mDetailLevels.size())
          return;
 
+      updateMVP();
       animate(mShape->mDetailLevels[mCurrentDetail]);
       renderDetail(mCurrentDetail);
    }
@@ -3147,6 +3148,9 @@ public:
          uint32_t matIndex = dd->matIndex & Dts3::Primitive::MaterialMask;
          uint32_t drawMode = prim.matIndex & Dts3::Primitive::TypeMask;
          MaterialBindingInfo binding = resolveMaterialBinding(matIndex, ri);
+         uint32_t materialFlags = mMaterialList && binding.materialIndex < mMaterialList->size()
+            ? mMaterialList->operator[](binding.materialIndex).tsProps.flags
+            : 0;
          if (!haveBoundState ||
              binding.pipelineState != currentPipelineState ||
              binding.textureGroupID != currentGroupID)
@@ -3162,6 +3166,7 @@ public:
                               smi.mMeshTransformOffset,
                               dd->texGenS[mi.mMeshFrame],
                               dd->texGenT[mi.mMeshFrame],
+                              materialFlags,
                               mDebugRenderDecals,
                               slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
                               1.0e-4f);
@@ -3203,6 +3208,9 @@ public:
             uint32_t matIndex = prim.matIndex & Dts3::Primitive::MaterialMask;
             uint32_t drawMode = prim.matIndex & Dts3::Primitive::TypeMask;
             MaterialBindingInfo binding = resolveMaterialBinding(matIndex, ri);
+            uint32_t materialFlags = mMaterialList && binding.materialIndex < mMaterialList->size()
+               ? mMaterialList->operator[](binding.materialIndex).tsProps.flags
+               : 0;
             if (!haveBoundState ||
                 binding.pipelineState != currentPipelineState ||
                 binding.textureGroupID != currentGroupID)
@@ -3214,7 +3222,7 @@ public:
                currentGroupID = binding.textureGroupID;
                haveBoundState = true;
             }
-            GFXSetTSPipelineProps(binding.materialFrame, mi.mMeshTransformOffset, slm::vec4(0), slm::vec4(0));
+            GFXSetTSPipelineProps(binding.materialFrame, mi.mMeshTransformOffset, slm::vec4(0), slm::vec4(0), materialFlags);
             
             assert(drawMode == Dts3::Primitive::Triangles);
             
@@ -3937,6 +3945,42 @@ public:
       if (ImGui::SliderInt("Detail Level", &detailSelection, 0, maxDetailSelection))
       {
          mDetailDist = (float)detailSelection;
+      }
+      ImGui::Separator();
+      ImGui::TextUnformatted("Lighting");
+      ImGui::DragFloat3("Light Position", &mViewer.mLightPos.x, 0.05f);
+      ImGui::ColorEdit3("Light Color", &mViewer.mLightColor.x);
+      float lightIntensity = std::max({mViewer.mLightColor.x, mViewer.mLightColor.y, mViewer.mLightColor.z, 0.0f});
+      if (ImGui::SliderFloat("Light Intensity", &lightIntensity, 0.0f, 8.0f))
+      {
+         if (lightIntensity <= 0.0f)
+         {
+            mViewer.mLightColor.x = 0.0f;
+            mViewer.mLightColor.y = 0.0f;
+            mViewer.mLightColor.z = 0.0f;
+         }
+         else
+         {
+            float prevIntensity = std::max({mViewer.mLightColor.x, mViewer.mLightColor.y, mViewer.mLightColor.z, 0.0f});
+            if (prevIntensity > 0.0f)
+            {
+               float scale = lightIntensity / prevIntensity;
+               mViewer.mLightColor.x *= scale;
+               mViewer.mLightColor.y *= scale;
+               mViewer.mLightColor.z *= scale;
+            }
+            else
+            {
+               mViewer.mLightColor.x = lightIntensity;
+               mViewer.mLightColor.y = lightIntensity;
+               mViewer.mLightColor.z = lightIntensity;
+            }
+         }
+      }
+      if (ImGui::Button("Reset Light"))
+      {
+         mViewer.mLightPos = slm::vec3(0, 2, 2);
+         mViewer.mLightColor = slm::vec4(1, 1, 1, 1);
       }
       ImGui::Checkbox("Render Nodes", &mRenderNodes);
       ImGui::Checkbox("Debug Render Decals", &mDebugRenderDecals);
