@@ -250,6 +250,149 @@ struct IO
       return true;
    }
 
+   static bool readLegacySequenceRecord(MemRStream& stream, Sequence& seq, uint32_t version)
+   {
+      seq = Sequence();
+
+      if (!stream.read(seq.nameIndex))
+         return false;
+
+      seq.flags = 0;
+      if (version > 21)
+      {
+         if (!stream.read(seq.flags))
+            return false;
+      }
+
+      if (version < 17)
+      {
+         int32_t startKeyframe = 0;
+         int32_t endKeyframe = 0;
+         if (!stream.read(startKeyframe) ||
+             !stream.read(endKeyframe))
+            return false;
+
+         seq.legacyKeyframeStart = startKeyframe;
+         seq.numKeyFrames = endKeyframe - startKeyframe;
+      }
+      else
+      {
+         if (!stream.read(seq.numKeyFrames))
+            return false;
+      }
+
+      if (!stream.read(seq.duration))
+         return false;
+
+      if (version < 22)
+      {
+         bool blend = false;
+         bool cyclic = false;
+         bool makePath = false;
+         if (!stream.read(blend) ||
+             !stream.read(cyclic) ||
+             !stream.read(makePath))
+            return false;
+
+         if (blend)
+            seq.flags |= Sequence::Blend;
+         if (cyclic)
+            seq.flags |= Sequence::Cyclic;
+         if (makePath)
+            seq.flags |= Sequence::MakePath;
+      }
+
+      if (!stream.read(seq.priority) ||
+          !stream.read(seq.firstGroundFrame) ||
+          !stream.read(seq.numGroundFrames))
+         return false;
+
+      if (version > 21)
+      {
+         if (!stream.read(seq.baseRot) ||
+             !stream.read(seq.baseTrans) ||
+             !stream.read(seq.baseScale) ||
+             !stream.read(seq.baseObjectState) ||
+             !stream.read(seq.baseDecalState))
+            return false;
+      }
+      else if (version >= 17)
+      {
+         if (!stream.read(seq.baseRot) ||
+             !stream.read(seq.baseObjectState) ||
+             !stream.read(seq.baseDecalState))
+            return false;
+         seq.baseTrans = seq.baseRot;
+      }
+
+      if (version > 8)
+      {
+         if (!stream.read(seq.firstTrigger) ||
+             !stream.read(seq.numTriggers))
+            return false;
+      }
+      else
+      {
+         seq.firstTrigger = 0;
+         seq.numTriggers = 0;
+      }
+
+      if (version > 7)
+      {
+         if (!stream.read(seq.toolBegin))
+            return false;
+      }
+      else
+      {
+         seq.toolBegin = 0.0f;
+      }
+
+      readIntegerSet(stream, seq.mattersRot);
+      if (version < 22)
+         seq.mattersTranslation = seq.mattersRot;
+      else
+      {
+         readIntegerSet(stream, seq.mattersTranslation);
+         readIntegerSet(stream, seq.mattersScale);
+      }
+
+      if (version < 17)
+      {
+         IntegerSet objectMembership;
+         readIntegerSet(stream, objectMembership);
+      }
+
+      if (version > 10)
+         readIntegerSet(stream, seq.mattersDecal);
+      if (version > 5)
+         readIntegerSet(stream, seq.mattersIfl);
+      readIntegerSet(stream, seq.mattersVis);
+      readIntegerSet(stream, seq.mattersFrame);
+      readIntegerSet(stream, seq.mattersMatframe);
+
+      if (version < 17)
+      {
+         IntegerSet nodeTransformStatic;
+         readIntegerSet(stream, nodeTransformStatic);
+      }
+
+      return true;
+   }
+
+   static bool readLegacyDetailLevel(MemRStream& stream, DetailLevel& detail)
+   {
+      if (!stream.read(detail.name) ||
+          !stream.read(detail.subshape) ||
+          !stream.read(detail.objectDetail) ||
+          !stream.read(detail.size))
+         return false;
+
+      detail.avgError = 0;
+      detail.maxError = 0;
+      detail.polyCount = 0;
+      return true;
+   }
+
    static bool primitiveNeedsTriangulation(const Primitive& prim)
    {
       const uint32_t primType = uint32_t(prim.matIndex) & Primitive::TypeMask;
@@ -1245,7 +1388,7 @@ struct IO
       shape->mDetailLevels.resize(numDetails);
       for (DetailLevel& detail : shape->mDetailLevels)
       {
-         if (!readDetailLevel(stream, detail))
+         if (!readLegacyDetailLevel(stream, detail))
             return false;
       }
 
@@ -1257,7 +1400,7 @@ struct IO
       shape->mSequences.resize(numSequences);
       for (Sequence& seq : shape->mSequences)
       {
-         if (!seq.readSerialized(stream, (int)version, true, nullptr, false))
+         if (!readLegacySequenceRecord(stream, seq, version))
             return false;
       }
 
@@ -1289,13 +1432,13 @@ struct IO
          shape->mNameTable.addString(name);
       }
 
-      bool gotMaterialList = false;
+      int32_t gotMaterialList = 0;
       if (!stream.read(gotMaterialList))
          return false;
-      if (gotMaterialList)
+      if (gotMaterialList != 0)
       {
          shape->mMaterials.mVariant = MaterialList::VARIANT_TS;
-         if (!shape->mMaterials.read(stream))
+         if (!shape->mMaterials.read(stream, version))
             return false;
       }
 
@@ -1354,11 +1497,18 @@ struct IO
 
             if (seq.numKeyFrames > 0)
             {
-               const int32_t keyframeStart = (seqIdx < legacyKeyframes.size()) ? legacyKeyframes[seqIdx].firstNodeState : 0;
+               const int32_t legacyKeyframeIndex = seq.legacyKeyframeStart;
+               if (legacyKeyframeIndex < 0 || legacyKeyframeIndex >= (int32_t)legacyKeyframes.size())
+                  return false;
+
+               const int32_t keyframeStart = legacyKeyframes[(size_t)legacyKeyframeIndex].firstNodeState;
+               const int32_t keyframeObjectStart = legacyKeyframes[(size_t)legacyKeyframeIndex].firstObjectState;
+               const int32_t keyframeDecalStart = legacyKeyframes[(size_t)legacyKeyframeIndex].firstDecalState;
+
                seq.baseRot = numNodeTracks ? keyframeStart : 0;
                seq.baseTrans = numNodeTracks ? keyframeStart : 0;
-               seq.baseObjectState = numObjectTracks ? (((seqIdx < legacyKeyframes.size()) ? legacyKeyframes[seqIdx].firstObjectState : 0) + skinObjectShift) : skinObjectShift;
-               seq.baseDecalState = numDecalTracks ? ((seqIdx < legacyKeyframes.size()) ? legacyKeyframes[seqIdx].firstDecalState : 0) : 0;
+               seq.baseObjectState = numObjectTracks ? (keyframeObjectStart + skinObjectShift) : skinObjectShift;
+               seq.baseDecalState = numDecalTracks ? keyframeDecalStart : 0;
 
                transposeLegacyTrackBlock(shape->mNodeRotations, (size_t)seq.baseRot, (size_t)seq.numKeyFrames, (size_t)numNodeTracks);
                transposeLegacyTrackBlock(shape->mNodeTranslations, (size_t)seq.baseTrans, (size_t)seq.numKeyFrames, (size_t)numNodeTracks);
@@ -1392,7 +1542,7 @@ struct IO
       
       // Reading material list
       shape->mMaterials.mVariant = MaterialList::VARIANT_TS;
-      shape->mMaterials.read(*ds.getBaseStream());
+      shape->mMaterials.read(*ds.getBaseStream(), ds.getVersion());
       
       // Reading various counts
       uint32_t numNodes = 0;

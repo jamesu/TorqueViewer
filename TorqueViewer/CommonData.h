@@ -1094,7 +1094,8 @@ public:
    
    virtual void free();
 
-   bool read(MemRStream& s);
+   bool read(MemRStream& s) override { return read(s, 0); }
+   bool read(MemRStream& s, uint32_t shapeVersion);
    bool write(MemRStream& s);
    
    bool parseFromStream(MemRStream& s);

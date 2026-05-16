@@ -412,7 +412,7 @@ void MaterialList::free()
    mMaterials.clear();
 }
 
-bool MaterialList::read(MemRStream& s)
+bool MaterialList::read(MemRStream& s, uint32_t shapeVersion)
 {
    free();
 
@@ -439,12 +439,15 @@ bool MaterialList::read(MemRStream& s)
       for (uint32_t i=0; i<numMaterials; i++)
       {
          std::string tmp;
-         s.readS8String(tmp);
+         uint8_t nameLen = 0;
+         s.read(nameLen);
+         tmp.resize(nameLen);
+         if (nameLen > 0)
+            s.read(nameLen, tmp.data());
          
          // paths need to be stripped off even in binary streams
-         char* toolPath = stripToolPath(buffer);
-         
-         push_back(toolPath);
+         std::snprintf(buffer, sizeof(buffer), "%s", tmp.c_str());
+         push_back(stripToolPath(buffer));
       }
    }
    else if (mVariant == VARIANT_TS)
@@ -458,40 +461,95 @@ bool MaterialList::read(MemRStream& s)
          s.read(nameLen);
          
          std::string name(nameLen, '\0');
-         s.read(nameLen, &name[0]);
+         if (nameLen > 0)
+            s.read(nameLen, &name[0]);
          
          mMaterials.push_back(Material(name.c_str()));
       }
       
       uint32_t tmp = 0;
-      
-      for (auto& mat : mMaterials)
+
+      if (shapeVersion < 2)
       {
-         s.read(tmp);
-         mat.tsProps.flags = tmp;
+         for (auto& mat : mMaterials)
+            mat.tsProps.flags = S_Wrap | T_Wrap;
       }
-      for (auto& mat : mMaterials)
+      else
       {
-         s.read(tmp);
-         mat.tsProps.reflectanceMap = tmp;
+         for (auto& mat : mMaterials)
+         {
+            s.read(tmp);
+            mat.tsProps.flags = (uint16_t)tmp;
+         }
       }
-      for (auto& mat : mMaterials)
+
+      if (shapeVersion < 5)
       {
-         s.read(tmp);
-         mat.tsProps.bumpMap = tmp;
+         for (uint32_t i = 0; i < numMaterials; ++i)
+         {
+            mMaterials[i].tsProps.reflectanceMap = (int16_t)i;
+            mMaterials[i].tsProps.bumpMap = (int16_t)0xFFFF;
+            mMaterials[i].tsProps.detailMap = (int16_t)0xFFFF;
+         }
       }
-      for (auto& mat : mMaterials)
+      else
       {
-         s.read(tmp);
-         mat.tsProps.detailMap = tmp;
+         for (auto& mat : mMaterials)
+         {
+            s.read(tmp);
+            mat.tsProps.reflectanceMap = (int16_t)tmp;
+         }
+         for (auto& mat : mMaterials)
+         {
+            s.read(tmp);
+            mat.tsProps.bumpMap = (int16_t)tmp;
+         }
+         for (auto& mat : mMaterials)
+         {
+            s.read(tmp);
+            mat.tsProps.detailMap = (int16_t)tmp;
+         }
       }
-      for (auto& mat : mMaterials)
+
+      if (shapeVersion > 11)
       {
-         s.read(mat.tsProps.detailScale);
+         for (auto& mat : mMaterials)
+            s.read(mat.tsProps.detailScale);
       }
+      else
+      {
+         for (auto& mat : mMaterials)
+            mat.tsProps.detailScale = 1.0f;
+      }
+
+      if (shapeVersion > 20)
+      {
+         for (auto& mat : mMaterials)
+            s.read(mat.tsProps.reflectionAmount);
+      }
+      else
+      {
+         for (auto& mat : mMaterials)
+            mat.tsProps.reflectionAmount = 1.0f;
+      }
+
+      if (shapeVersion < 16)
+      {
+         for (auto& mat : mMaterials)
+         {
+            if ((mat.tsProps.flags & Translucent) != 0)
+               mat.tsProps.flags |= NeverEnvMap;
+         }
+      }
+
       for (auto& mat : mMaterials)
       {
-         s.read(mat.tsProps.reflectionAmount);
+         const char* str = std::strrchr(mat.name.c_str(), '.');
+         if ((mat.tsProps.flags & IflMaterial) != 0 ||
+             (shapeVersion < 6 && str && strcasecmp(str, ".ifl") == 0))
+         {
+            mat.name.clear();
+         }
       }
    }
    else

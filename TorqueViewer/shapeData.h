@@ -321,6 +321,7 @@ struct Sequence
    int firstTrigger;
    int numTriggers;
    float toolBegin;
+   int legacyKeyframeStart;
    
    IntegerSet mattersRot;        // matters mask for node*Rotation
    IntegerSet mattersTranslation;// matters mask for node*Translation
@@ -340,7 +341,7 @@ struct Sequence
    : nameIndex(na), flags(fl), numKeyFrames(nk), duration(du), priority(pri),
    firstGroundFrame(fg), numGroundFrames(ng), baseRot(br), baseTrans(bt),
    baseScale(bs), baseObjectState(bos), baseDecalState(bds), firstTrigger(ft),
-   numTriggers(nt), toolBegin(tb)
+   numTriggers(nt), toolBegin(tb), legacyKeyframeStart(-1)
    {
    }
    
@@ -422,7 +423,117 @@ struct Sequence
       mattersFrame.reset();
       mattersMatframe.reset();
 
-      if (version >= 19 && version <= 21)
+      if (version < 17)
+      {
+         int32_t startKeyframe = 0;
+         int32_t endKeyframe = 0;
+         if (!fs.read(startKeyframe) ||
+             !fs.read(endKeyframe) ||
+             !fs.read(duration))
+            return false;
+
+         legacyKeyframeStart = startKeyframe;
+         numKeyFrames = endKeyframe - startKeyframe;
+
+         bool blend = false;
+         bool cyclic = false;
+         bool makePath = false;
+         if (!fs.read(blend) || !fs.read(cyclic) || !fs.read(makePath))
+            return false;
+
+         if (blend)
+            flags |= Blend;
+         if (cyclic)
+            flags |= Cyclic;
+         if (makePath)
+            flags |= MakePath;
+
+         if (!fs.read(priority) ||
+             !fs.read(firstGroundFrame) ||
+             !fs.read(numGroundFrames))
+            return false;
+
+         if (version > 8)
+         {
+            if (!fs.read(firstTrigger) || !fs.read(numTriggers))
+               return false;
+         }
+         else
+         {
+            firstTrigger = 0;
+            numTriggers = 0;
+         }
+
+         if (version > 7)
+         {
+            if (!fs.read(toolBegin))
+               return false;
+         }
+         else
+         {
+            toolBegin = 0.0f;
+         }
+
+         readIntegerSet(fs, mattersRot);
+         mattersTranslation = mattersRot;
+
+         IntegerSet objectMembership;
+         readIntegerSet(fs, objectMembership);
+
+         if (version > 10)
+            readIntegerSet(fs, mattersDecal);
+         if (version > 5)
+            readIntegerSet(fs, mattersIfl);
+         readIntegerSet(fs, mattersVis);
+         readIntegerSet(fs, mattersFrame);
+         readIntegerSet(fs, mattersMatframe);
+
+         IntegerSet nodeTransformStatic;
+         readIntegerSet(fs, nodeTransformStatic);
+      }
+      else if (version >= 17 && version < 19)
+      {
+         if (!fs.read(numKeyFrames) ||
+             !fs.read(duration))
+            return false;
+
+         bool blend = false;
+         bool cyclic = false;
+         bool makePath = false;
+         if (!fs.read(blend) || !fs.read(cyclic) || !fs.read(makePath))
+            return false;
+
+         if (blend)
+            flags |= Blend;
+         if (cyclic)
+            flags |= Cyclic;
+         if (makePath)
+            flags |= MakePath;
+
+         if (!fs.read(priority) ||
+             !fs.read(firstGroundFrame) ||
+             !fs.read(numGroundFrames) ||
+             !fs.read(baseRot) ||
+             !fs.read(baseObjectState) ||
+             !fs.read(baseDecalState) ||
+             !fs.read(firstTrigger) ||
+             !fs.read(numTriggers) ||
+             !fs.read(toolBegin))
+            return false;
+
+         readIntegerSet(fs, mattersRot);
+         mattersTranslation = mattersRot;
+         if (version > 10)
+            readIntegerSet(fs, mattersDecal);
+         if (version > 5)
+            readIntegerSet(fs, mattersIfl);
+         readIntegerSet(fs, mattersVis);
+         readIntegerSet(fs, mattersFrame);
+         readIntegerSet(fs, mattersMatframe);
+
+         baseTrans = baseRot;
+      }
+      else if (version >= 19 && version <= 21)
       {
          if (!fs.read(numKeyFrames) || !fs.read(duration))
             return false;
