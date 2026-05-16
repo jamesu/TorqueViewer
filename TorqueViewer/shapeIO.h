@@ -250,14 +250,19 @@ struct IO
       return true;
    }
 
-   static bool readLegacySequenceRecord(MemRStream& stream, Sequence& seq, uint32_t version)
+   static bool readLegacySequenceBody(MemRStream& stream, Sequence& seq, uint32_t version)
    {
-      seq = Sequence();
-
-      if (!stream.read(seq.nameIndex))
-         return false;
-
       seq.flags = 0;
+      seq.baseScale = -1;
+      seq.mattersRot.reset();
+      seq.mattersTranslation.reset();
+      seq.mattersScale.reset();
+      seq.mattersDecal.reset();
+      seq.mattersIfl.reset();
+      seq.mattersVis.reset();
+      seq.mattersFrame.reset();
+      seq.mattersMatframe.reset();
+
       if (version > 21)
       {
          if (!stream.read(seq.flags))
@@ -377,6 +382,16 @@ struct IO
       }
 
       return true;
+   }
+
+   static bool readLegacySequenceRecord(MemRStream& stream, Sequence& seq, uint32_t version)
+   {
+      seq = Sequence();
+
+      if (!stream.read(seq.nameIndex))
+         return false;
+
+      return readLegacySequenceBody(stream, seq, version);
    }
 
    static bool readLegacyDetailLevel(MemRStream& stream, DetailLevel& detail)
@@ -534,15 +549,174 @@ struct IO
       return true;
    }
 
-   static bool readDSQSequences(Shape* shape, MemRStream& stream, uint32_t version, bool readNameIndex = true, bool addNames = true, bool append = true)
+   static bool readLegacyImportedSequences(Shape* shape,
+                                           MemRStream& stream,
+                                           uint32_t fileVersion,
+                                           bool addNames,
+                                           bool append)
    {
       if (!append)
          clearImportedSequenceData(shape);
 
+      std::vector<int32_t> nodeMap;
+      if (!readImportedNodeMap(shape, stream, nodeMap))
+         return false;
+
+      int32_t legacyObjectNameCount = 0;
+      int32_t oldShapeNumObjects = 0;
+      if (!stream.read(legacyObjectNameCount) || !stream.read(oldShapeNumObjects))
+         return false;
+
+      std::vector<LegacyKeyframe> legacyKeyframes;
+      if (fileVersion < 17)
+      {
+         int32_t keyframeCount = 0;
+         if (!stream.read(keyframeCount) || keyframeCount < 0)
+            return false;
+
+         legacyKeyframes.resize((size_t)keyframeCount);
+         for (LegacyKeyframe& keyframe : legacyKeyframes)
+         {
+            if (!stream.read(keyframe.firstNodeState) ||
+                !stream.read(keyframe.firstObjectState) ||
+                !stream.read(keyframe.firstDecalState))
+               return false;
+         }
+      }
+
+      ImportedAnimationData imported;
+      if (!readImportedAnimationData(stream, fileVersion, imported))
+         return false;
+
+      int32_t objectStateCount = 0;
+      if (!stream.read(objectStateCount))
+         return false;
+
+      const int32_t triggerBase = (int32_t)shape->mTriggers.size();
+      const int32_t groundBase = (int32_t)shape->mGroundTranslations.size();
+      const int32_t nodeRotBase = (int32_t)shape->mNodeRotations.size();
+      const int32_t nodeTransBase = (int32_t)shape->mNodeTranslations.size();
+
+      shape->mNodeRotations.insert(shape->mNodeRotations.end(),
+                                   imported.rotations.begin(),
+                                   imported.rotations.end());
+      shape->mNodeTranslations.insert(shape->mNodeTranslations.end(),
+                                      imported.translations.begin(),
+                                      imported.translations.end());
+
+      int32_t sequenceCount = 0;
+      if (!stream.read(sequenceCount) || sequenceCount < 0)
+         return false;
+
+      std::vector<int32_t> importedSequenceBases;
+      importedSequenceBases.reserve((size_t)sequenceCount);
+
+      const int32_t shapeNodeShift = nodeRotBase - (int32_t)nodeMap.size();
+      const int32_t shapeNodeTransShift = nodeTransBase - (int32_t)nodeMap.size();
+
+      for (int32_t sequenceIndex = 0; sequenceIndex < sequenceCount; ++sequenceIndex)
+      {
+         Sequence seq;
+         seq.nameIndex = Sequence::readName(shape->mNameTable, stream, addNames);
+         if (seq.nameIndex < 0)
+            return false;
+         if (!readLegacySequenceBody(stream, seq, fileVersion))
+            return false;
+
+         // Remap matter sets into the current shape.
+         IntegerSet newMattersRot;
+         IntegerSet newMattersTranslation;
+         IntegerSet newMattersScale;
+         std::vector<TrackRemap> rotationRemap;
+         std::vector<TrackRemap> translationRemap;
+         std::vector<TrackRemap> scaleRemap;
+         buildTrackRemap(seq.mattersRot, newMattersRot, rotationRemap, nodeMap);
+         buildTrackRemap(seq.mattersTranslation, newMattersTranslation, translationRemap, nodeMap);
+         buildTrackRemap(seq.mattersScale, newMattersScale, scaleRemap, nodeMap);
+         seq.mattersRot = newMattersRot;
+         seq.mattersTranslation = newMattersTranslation;
+         seq.mattersScale = newMattersScale;
+
+         if (fileVersion >= 17)
+         {
+            seq.baseRot += shapeNodeShift;
+            seq.baseTrans += shapeNodeTransShift;
+            if (seq.testFlags(Sequence::ArbitraryScale))
+               seq.baseScale += (int32_t)shape->mNodeArbitraryScaleFactors.size();
+            else if (seq.testFlags(Sequence::AlignedScale))
+               seq.baseScale += (int32_t)shape->mNodeAlignedScales.size();
+            else if (seq.testFlags(Sequence::UniformScale))
+               seq.baseScale += (int32_t)shape->mNodeUniformScales.size();
+         }
+         else
+         {
+            seq.baseRot = (int32_t)nodeRotBase + seq.legacyKeyframeStart;
+            seq.baseTrans = seq.baseRot;
+            seq.baseObjectState = 0;
+            seq.baseDecalState = 0;
+            importedSequenceBases.push_back(seq.legacyKeyframeStart);
+         }
+
+         seq.firstTrigger += triggerBase;
+         shape->mSequences.push_back(seq);
+      }
+
+      if (fileVersion < 17)
+      {
+         const size_t importedSequenceStart = shape->mSequences.size() - importedSequenceBases.size();
+         for (size_t i = 0; i < importedSequenceBases.size(); ++i)
+         {
+            Sequence& seq = shape->mSequences[importedSequenceStart + i];
+            const int32_t legacyKeyframeIndex = importedSequenceBases[i];
+            if (legacyKeyframeIndex < 0 || legacyKeyframeIndex >= (int32_t)legacyKeyframes.size())
+               return false;
+
+            const LegacyKeyframe& keyframe = legacyKeyframes[(size_t)legacyKeyframeIndex];
+            const int32_t numNodeTracks = (int32_t)seq.mattersRot.count();
+            const int32_t numObjectTracks = (int32_t)(seq.mattersVis.count() +
+                                                      seq.mattersFrame.count() +
+                                                      seq.mattersMatframe.count());
+            const int32_t numDecalTracks = (int32_t)seq.mattersDecal.count();
+
+            seq.baseRot = numNodeTracks ? keyframe.firstNodeState : 0;
+            seq.baseTrans = seq.baseRot;
+            seq.baseObjectState = numObjectTracks ? keyframe.firstObjectState : 0;
+            seq.baseDecalState = numDecalTracks ? keyframe.firstDecalState : 0;
+
+            transposeLegacyTrackBlock(shape->mNodeRotations, (size_t)seq.baseRot, (size_t)seq.numKeyFrames, (size_t)numNodeTracks);
+            transposeLegacyTrackBlock(shape->mNodeTranslations, (size_t)seq.baseTrans, (size_t)seq.numKeyFrames, (size_t)numNodeTracks);
+            transposeLegacyTrackBlock(shape->mObjectStates, (size_t)seq.baseObjectState, (size_t)seq.numKeyFrames, (size_t)numObjectTracks);
+            transposeLegacyTrackBlock(shape->mDecalStates, (size_t)seq.baseDecalState, (size_t)seq.numKeyFrames, (size_t)numDecalTracks);
+         }
+      }
+
+      int32_t triggerCount = 0;
+      if (!stream.read(triggerCount) || triggerCount < 0)
+         return false;
+
+      shape->mTriggers.resize(shape->mTriggers.size() + triggerCount);
+      for (int32_t i = 0; i < triggerCount; ++i)
+      {
+         if (!readTrigger(stream, shape->mTriggers[(size_t)triggerBase + i]))
+            return false;
+      }
+
+      return stream.mPos == stream.mSize;
+   }
+
+   static bool readDSQSequences(Shape* shape, MemRStream& stream, uint32_t version, bool readNameIndex = true, bool addNames = true, bool append = true)
+   {
       int32_t fileVersion = 0;
       if (!stream.read(fileVersion))
          return false;
-      if (fileVersion < 19 || fileVersion > DefaultVersion)
+
+      if (!append)
+         clearImportedSequenceData(shape);
+
+      if (fileVersion < 19)
+         return readLegacyImportedSequences(shape, stream, (uint32_t)fileVersion, addNames, append);
+
+      if (fileVersion > DefaultVersion)
          return false;
 
       std::vector<int32_t> nodeMap;
