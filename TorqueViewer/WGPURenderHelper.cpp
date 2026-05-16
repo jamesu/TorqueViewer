@@ -1595,10 +1595,7 @@ WGPURenderPassDescriptor SDLState::createRenderPass(bool secondary)
    depthAttachment.depthLoadOp = WGPULoadOp_Clear;  // Clear the depth buffer
    depthAttachment.depthStoreOp = WGPUStoreOp_Store; // Store depth after rendering
    depthAttachment.depthClearValue = 1.0f;
-   depthAttachment.stencilLoadOp = WGPULoadOp_Clear; // Optional if you are using stencil
-   depthAttachment.stencilStoreOp = WGPUStoreOp_Discard;
-   depthAttachment.stencilClearValue = 0;
-   
+
    WGPURenderPassDescriptor renderPassDesc = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
    renderPassDesc.label = WGPUString(secondary ? "OverlayRenderPass" : "MainRenderPass");
    renderPassDesc.colorAttachmentCount = 1;

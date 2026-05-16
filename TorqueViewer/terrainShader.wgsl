@@ -27,7 +27,7 @@ struct CommonUniforms {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) texCoords: vec2<f32>,  // Pass texCoords to fragment
-    @location(1) matIndex: u32,         // Pass material index to fragment
+    @location(1) @interpolate(flat) matIndex: u32,         // Pass material index to fragment
     @location(2) debugCol: vec4<f32>,
     @location(3) lmCoord : vec2<f32>
 };
@@ -165,4 +165,3 @@ fn fragMain(input: VertexOutput) -> @location(0) vec4<f32> {
         return sampledColor * sampledLight;
     }
 }
-
