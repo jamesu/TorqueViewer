@@ -478,11 +478,13 @@ public:
    
    slm::vec4 mLightColor;
    slm::vec3 mLightPos;
+   bool mLightFollowsCamera;
    
    GenericViewer() : mResourceManager(NULL), mPalette(NULL), mMaterialList(NULL)
    {
       useShared = false;
       mResourceMount = -1;
+      mLightFollowsCamera = false;
    }
 
    void setResourcePath(const char* filename, int32_t forceMount = -1)
@@ -3994,6 +3996,8 @@ public:
       SDL_GetWindowSize(mWindow, &w, &h);
       mViewer.mProjectionMatrix = slm::perspective_fov_rh( slm::radians(90.0), (float)w/(float)h, 0.01f, 10000.0f);
       mViewer.mDebugRenderDecals = mDebugRenderDecals;
+      if (mViewer.mLightFollowsCamera)
+         mViewer.mLightPos = mViewPos;
       
       if (!mManualThreads)
          mViewer.advanceThreads(dt);
@@ -4100,7 +4104,17 @@ public:
       }
       ImGui::Separator();
       ImGui::TextUnformatted("Lighting");
-      ImGui::DragFloat3("Light Position", &mViewer.mLightPos.x, 0.05f);
+      ImGui::Checkbox("Follow Camera", &mViewer.mLightFollowsCamera);
+      if (mViewer.mLightFollowsCamera)
+      {
+         ImGui::BeginDisabled();
+         ImGui::DragFloat3("Light Position", &mViewer.mLightPos.x, 0.05f);
+         ImGui::EndDisabled();
+      }
+      else
+      {
+         ImGui::DragFloat3("Light Position", &mViewer.mLightPos.x, 0.05f);
+      }
       ImGui::ColorEdit3("Light Color", &mViewer.mLightColor.x);
       float lightIntensity = std::max({mViewer.mLightColor.x, mViewer.mLightColor.y, mViewer.mLightColor.z, 0.0f});
       if (ImGui::SliderFloat("Light Intensity", &lightIntensity, 0.0f, 8.0f))
@@ -4307,6 +4321,7 @@ template<class T> static ResourceInstance* _createClass() { return new T(); }
 void ResManager::initStatics()
 {
    registerCreateFunc(".dts", _createClass<Dts3::Shape>);
+   registerCreateFunc(".DTS", _createClass<Dts3::Shape>);
 }
 
 
