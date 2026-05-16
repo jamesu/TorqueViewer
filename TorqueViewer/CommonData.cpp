@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <cctype>
 #include <climits>
 #include <unordered_map>
 #include <iostream>
@@ -1181,6 +1182,59 @@ bool ResManager::resolveResourcePath(const char *filename, std::string& outFilen
    return true;
 }
 
+static std::string lowercasePathPart(const fs::path& pathPart)
+{
+   std::string lowered = pathPart.generic_string();
+   std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                  [](unsigned char c) { return (char)std::tolower(c); });
+   return lowered;
+}
+
+static bool resolveFilesystemPathCaseInsensitive(const fs::path& basePath, const fs::path& relativePath, fs::path& outPath)
+{
+   fs::path currentPath = basePath;
+
+   for (const fs::path& rawPart : relativePath)
+   {
+      if (rawPart.empty() || rawPart == ".")
+         continue;
+
+      if (rawPart == "..")
+      {
+         currentPath = currentPath.parent_path();
+         continue;
+      }
+
+      const fs::path exactCandidate = currentPath / rawPart;
+      if (fs::exists(exactCandidate))
+      {
+         currentPath = exactCandidate;
+         continue;
+      }
+
+      if (!fs::exists(currentPath) || !fs::is_directory(currentPath))
+         return false;
+
+      const std::string targetPart = lowercasePathPart(rawPart);
+      bool foundMatch = false;
+      for (const fs::directory_entry& entry : fs::directory_iterator(currentPath))
+      {
+         if (lowercasePathPart(entry.path().filename()) == targetPart)
+         {
+            currentPath /= entry.path().filename();
+            foundMatch = true;
+            break;
+         }
+      }
+
+      if (!foundMatch)
+         return false;
+   }
+
+   outPath = currentPath;
+   return true;
+}
+
 bool ResManager::openFile(const char *filename, MemRStream &stream, int32_t forceMount)
 {
    std::string resolvedFilename;
@@ -1203,6 +1257,13 @@ bool ResManager::openFile(const char *filename, MemRStream &stream, int32_t forc
       char buffer[PATH_MAX];
       snprintf(buffer, PATH_MAX, "%s/%s", path.c_str(), resolvedFilename.c_str());
       if (openFilesystemStream(buffer, stream))
+      {
+         return true;
+      }
+
+      fs::path correctedPath;
+      if (resolveFilesystemPathCaseInsensitive(fs::path(path), fs::path(resolvedFilename), correctedPath) &&
+          openFilesystemStream(correctedPath.generic_string().c_str(), stream))
       {
          return true;
       }
