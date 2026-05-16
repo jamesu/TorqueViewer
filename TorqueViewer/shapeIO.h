@@ -1297,18 +1297,14 @@ struct IO
          prev = first;
       }
 
-      // Optional pre-v16 mesh remap table.
+      // Mesh index list for old shapes
+      std::vector<int32_t> meshIndexList;
       if (version < 16)
       {
-         uint32_t meshIndexCount = 0;
-         if (!stream.read(meshIndexCount))
-            return false;
-         for (uint32_t i = 0; i < meshIndexCount; ++i)
-         {
-            uint32_t discard = 0;
-            if (!stream.read(discard))
-               return false;
-         }
+         uint32_t sz = 0;
+         stream.read(sz);
+         meshIndexList.resize(sz);
+         stream.read32(sz, meshIndexList.data());
       }
 
       // Optional pre-v17 keyframes. These get transposed into track-major
@@ -1421,15 +1417,42 @@ struct IO
       if (!stream.read(numMeshes))
          return false;
       shape->mMeshes.resize(numMeshes);
-      for (uint32_t i = 0; i < numMeshes; ++i)
+      
+      if (version > 15)
       {
-         Mesh& mesh = shape->mMeshes[i];
-         uint32_t meshType = 0;
-         if (!stream.read(meshType))
-            return false;
-         mesh.setType((Mesh::Type)meshType);
-         if (!readLegacyMesh(&mesh, shape, stream, version))
-            return false;
+         for (uint32_t i = 0; i < numMeshes; ++i)
+         {
+            Mesh& mesh = shape->mMeshes[i];
+            uint32_t meshType = 0;
+            if (!stream.read(meshType))
+               return false;
+            mesh.setType((Mesh::Type)meshType);
+            if (!readLegacyMesh(&mesh, shape, stream, version))
+               return false;
+         }
+      }
+      else
+      {
+         // Use mesh index list
+         for (uint32_t i=0; i<meshIndexList.size(); i++)
+         {
+            int32_t meshIndex = meshIndexList[i];
+            if (meshIndex >= 0)
+            {
+               Mesh& mesh = shape->mMeshes[i];
+               uint32_t meshType = 0;
+               if (!stream.read(meshType))
+                  return false;
+               mesh.setType((Mesh::Type)meshType);
+               if (!readLegacyMesh(&mesh, shape, stream, version))
+                  return false;
+            }
+            else
+            {
+               // No mesh
+               shape->mMeshes[i] = Mesh();
+            }
+         }
       }
 
       if (!stream.read(numNames))
@@ -1547,6 +1570,8 @@ struct IO
 
    template<typename T> static bool readShape(Shape* shape, T& ds)
    {
+      // NOTE: to simplify things, we assume we are reading AT LEAST v19 here.
+      
       // Reading sequences
       uint32_t numSequences = 0;
       ds.getBaseStream()->read(numSequences);
@@ -1705,15 +1730,6 @@ struct IO
       
       // NOTE: firstTranslucent isn't stored in file
       
-      // Mesh index list for old shapes
-      std::vector<int32_t> meshIndexList;
-      if (ds.getVersion() < 16)
-      {
-         uint32_t sz = 0;
-         ds.read(sz);
-         ds.read32(sz, meshIndexList.data());
-      }
-      
       // Reading default translations and rotations
       shape->mDefaultRotations.resize(numNodes);
       shape->mDefaultTranslations.resize(numNodes);
@@ -1766,7 +1782,7 @@ struct IO
       shape->mGroundTranslations.resize(numGroundFrames);
       shape->mGroundRotations.resize(numGroundFrames);
       
-      if (ds.getVersion()>23)
+      if (ds.getVersion() > 23)
       {
          for (int i = 0; i < numGroundFrames; ++i)
          {
@@ -1817,37 +1833,12 @@ struct IO
       // NOTE: pre-v23 shapes serialize base meshes first, then a separate skin mesh tail.
       const uint32_t totalMeshes = ds.getVersion() < 23 ? (numMeshes + numSkins) : numMeshes;
       
-      if (ds.getVersion() > 15)
+      shape->mMeshes.resize(totalMeshes);
+      for (uint32_t i = 0; i < numMeshes; ++i)
       {
-         shape->mMeshes.resize(totalMeshes);
-         for (uint32_t i = 0; i < numMeshes; ++i)
-         {
-            Mesh& m = shape->mMeshes[i];
-            ds.read(m.mType);
-            bool didRead = readMesh(&m, shape, ds);
-         }
-      }
-      else
-      {
-         shape->mMeshes.resize(totalMeshes);
-         
-         // Use mesh index list
-         for (uint32_t i=0; i<meshIndexList.size(); i++)
-         {
-            int32_t meshIndex = meshIndexList[i];
-            if (meshIndex >= 0)
-            {
-               Mesh& m = shape->mMeshes[i];
-               ds.read(m.mType);
-               bool didRead = readMesh(&m, shape, ds);
-            }
-            else
-            {
-               // No mesh
-               shape->mMeshes[i] = Mesh();
-            }
-         }
-         assert(false);
+         Mesh& m = shape->mMeshes[i];
+         ds.read(m.mType);
+         bool didRead = readMesh(&m, shape, ds);
       }
       
       ds.readCheck();
