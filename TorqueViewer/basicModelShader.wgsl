@@ -23,28 +23,52 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) vTexCoord0: vec2<f32>,
-    @location(1) vColor0: vec4<f32>,
+    @location(1) vLighting: vec3<f32>,
 };
 
 struct FragmentOutput {
     @location(0) Color: vec4<f32>,
 };
 
+fn inverse3x3(m: mat3x3<f32>) -> mat3x3<f32> {
+    let a = m[0];
+    let b = m[1];
+    let c = m[2];
+    let r0 = cross(b, c);
+    let r1 = cross(c, a);
+    let r2 = cross(a, b);
+    let invDet = 1.0 / dot(a, r0);
+    return mat3x3<f32>(r0 * invDet, r1 * invDet, r2 * invDet);
+}
+
 
 @vertex
 fn mainVert(input: VertexInput) -> VertexOutput {
-    let normal: vec3<f32> = normalize((commonUniforms.modelMat * vec4<f32>(input.aNormal, 0.0)).xyz);
-    let lightDir: vec3<f32> = normalize(commonUniforms.lightPos.xyz);
-    let NdotL: f32 = max(dot(normal, lightDir), 0.0);
-    let diffuse = vec4<f32>(commonUniforms.lightColor.xyz, 1.0);
-
     let mvpMat: mat4x4<f32> = commonUniforms.projMat * commonUniforms.viewMat * commonUniforms.modelMat;
+    let worldPos = commonUniforms.modelMat * vec4<f32>(input.aPosition, 1.0);
+    let model3 = mat3x3<f32>(commonUniforms.modelMat[0].xyz, commonUniforms.modelMat[1].xyz, commonUniforms.modelMat[2].xyz);
+    let normalMat = transpose(inverse3x3(model3));
+    let normal: vec3<f32> = normalize(normalMat * input.aNormal);
+    let lightVec = commonUniforms.lightPos.xyz - worldPos.xyz;
+    let lightDist = length(lightVec);
+    let lightDir = select(vec3<f32>(0.0), normalize(lightVec), lightDist > 1e-5);
+    let isDirectional = commonUniforms.lightPos.w > 0.5;
+    let ndotlRaw = dot(normal, select(lightDir, normalize(commonUniforms.lightPos.xyz), isDirectional));
+    let ndotl = select(
+        max(ndotlRaw, 0.0),
+        clamp(ndotlRaw * 0.5 + 0.5, 0.0, 1.0),
+        isDirectional
+    );
+    let pointAtten = select(
+        1.0,
+        clamp(1.0 - (lightDist / max(commonUniforms.lightColor.a, 1.0)), 0.0, 1.0),
+        !isDirectional && commonUniforms.lightColor.a > 0.0
+    );
 
     var output: VertexOutput;
     output.position = mvpMat * vec4<f32>(input.aPosition, 1.0);
     output.vTexCoord0 = input.aTexCoord0;
-    output.vColor0 = vec4<f32>(1.0, 1.0, 1.0, 1.0); // Set to white color as per original shader
-    output.vColor0.a = 1.0;
+    output.vLighting = vec3<f32>(0.2) + (commonUniforms.lightColor.rgb * ndotl * pointAtten);
 
     return output;
 }
@@ -58,9 +82,9 @@ fn mainFrag(input: VertexOutput) -> FragmentOutput {
     }
 
     var outputColor: vec4<f32>;
-    outputColor.r = color.r * input.vColor0.r * input.vColor0.a;
-    outputColor.g = color.g * input.vColor0.g * input.vColor0.a;
-    outputColor.b = color.b * input.vColor0.b * input.vColor0.a;
+    outputColor.r = color.r * input.vLighting.r;
+    outputColor.g = color.g * input.vLighting.g;
+    outputColor.b = color.b * input.vLighting.b;
     outputColor.a = color.a;
 
     var out: FragmentOutput;

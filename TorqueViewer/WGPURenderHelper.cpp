@@ -249,6 +249,7 @@ struct SDLState
    
    slm::vec4 lightColor;
    slm::vec3 lightPos;
+   bool lightDirectional;
    slm::vec2 viewportSize;
    
    SDL_Window *window;
@@ -969,6 +970,7 @@ SDLState::SDLState()
    
    lightColor = slm::vec4(0);
    lightPos = slm::vec3(0);
+   lightDirectional = false;
    viewportSize = slm::vec2(0);
    
    window = NULL;
@@ -1304,6 +1306,7 @@ void SDLState::resetWGPUState()
    currentModelTransformTexID = -1;
    fallbackDiffuseTexID = -1;
    fallbackTransformTexID = -1;
+   lightDirectional = false;
 }
 
 WGPUBindGroup SDLState::makeSimpleTextureBG(WGPUTextureView tex, WGPUSampler sampler)
@@ -2417,17 +2420,18 @@ void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &pro
    }
 }
 
-void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient)
+void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient, bool directional)
 {
    smState.lightPos = pos;
    smState.lightColor = ambient;
+   smState.lightDirectional = directional;
 
    if (smState.currentProgram == NULL)
       return;
    
    if (smState.currentPipeline != smState.lineProgram.pipeline)
    {
-      smState.currentProgram->uniforms.lightPos = slm::vec4(pos.x, pos.y, pos.z, 0.0f);
+      smState.currentProgram->uniforms.lightPos = slm::vec4(pos.x, pos.y, pos.z, directional ? 1.0f : 0.0f);
       smState.currentProgram->uniforms.lightColor = slm::vec4(ambient.x, ambient.y, ambient.z, ambient.w);
    }
 }
@@ -2490,7 +2494,7 @@ void GFXBeginTSModelPipelineState(ModelPipelineState state, uint32_t tsGroupID, 
    smState.currentProgram = &smState.modelProgram;
    wgpuRenderPassEncoderSetPipeline(smState.renderEncoder, smState.currentPipeline);
    
-   GFXSetLightPos(smState.lightPos, smState.lightColor);
+   GFXSetLightPos(smState.lightPos, smState.lightColor, smState.lightDirectional);
    GFXSetModelViewProjection(smState.modelMatrix, smState.viewMatrix, smState.projectionMatrix);
    
    if (state == ModelPipeline_DefaultDiffuse)
@@ -2517,7 +2521,7 @@ void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID
    smState.currentProgram = &smState.modelProgram;
    wgpuRenderPassEncoderSetPipeline(smState.renderEncoder, smState.currentPipeline);
    
-   GFXSetLightPos(smState.lightPos, smState.lightColor);
+   GFXSetLightPos(smState.lightPos, smState.lightColor, false);
    GFXSetModelViewProjection(smState.modelMatrix, smState.viewMatrix, smState.projectionMatrix);
    
    if (state == ModelPipeline_DefaultDiffuse)

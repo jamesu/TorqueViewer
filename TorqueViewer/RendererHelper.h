@@ -40,7 +40,7 @@ extern void* GFXGetTextureViewHandle(int32_t texID);
 extern void GFXLoadModelData(uint32_t modelId, void* verts, void* texverts, void* inds, void* skin, uint32_t numVerts, uint32_t numTexVerts, uint32_t numInds, uint32_t numSkinVerts);
 extern void GFXClearModelData(uint32_t modelId);
 extern void GFXSetModelViewProjection(slm::mat4 &model, slm::mat4 &view, slm::mat4 &proj, uint32_t flags=0);
-extern void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient);
+extern void GFXSetLightPos(slm::vec3 pos, slm::vec4 ambient, bool directional = false);
 extern void GFXSetModelTransformTexture(int32_t texID);
 //
 extern void GFXSetTSMaterialResources(uint32_t tsGroupID, int32_t diffuseTexID, int32_t emapAlphaTexID, int32_t emapTexID, int32_t dmapID);

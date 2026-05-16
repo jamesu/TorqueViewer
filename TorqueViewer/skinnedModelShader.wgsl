@@ -41,6 +41,17 @@ struct FragmentOutput {
     @location(0) Color: vec4<f32>,
 };
 
+fn inverse3x3(m: mat3x3<f32>) -> mat3x3<f32> {
+    let a = m[0];
+    let b = m[1];
+    let c = m[2];
+    let r0 = cross(b, c);
+    let r1 = cross(c, a);
+    let r2 = cross(a, b);
+    let invDet = 1.0 / dot(a, r0);
+    return mat3x3<f32>(r0 * invDet, r1 * invDet, r2 * invDet);
+}
+
 fn getTransformTexelCoord(texelIndex: u32) -> vec2<i32> {
     let texWidth = max(u32(commonUniforms.params1.y), 1u);
     return vec2<i32>(i32(texelIndex % texWidth), i32(texelIndex / texWidth));
@@ -108,9 +119,24 @@ fn mainVert(input: VertexInput) -> VertexOutput {
     // END DEBUG
 
     let worldPos = commonUniforms.modelMat * vec4<f32>(skinnedPos, 1.0);
-    let worldNormal = normalize((commonUniforms.modelMat * vec4<f32>(normalize(skinnedNormal), 0.0)).xyz);
-    let lightDir = normalize(commonUniforms.lightPos.xyz - worldPos.xyz);
-    let ndotl = max(dot(worldNormal, lightDir), 0.0);
+    let model3 = mat3x3<f32>(commonUniforms.modelMat[0].xyz, commonUniforms.modelMat[1].xyz, commonUniforms.modelMat[2].xyz);
+    let normalMat = transpose(inverse3x3(model3));
+    let worldNormal = normalize(normalMat * normalize(skinnedNormal));
+    let lightVec = commonUniforms.lightPos.xyz - worldPos.xyz;
+    let lightDist = length(lightVec);
+    let lightDir = select(vec3<f32>(0.0), normalize(lightVec), lightDist > 1e-5);
+    let isDirectional = commonUniforms.lightPos.w > 0.5;
+    let ndotlRaw = dot(worldNormal, select(lightDir, normalize(commonUniforms.lightPos.xyz), isDirectional));
+    let ndotl = select(
+        max(ndotlRaw, 0.0),
+        clamp(ndotlRaw * 0.5 + 0.5, 0.0, 1.0),
+        isDirectional
+    );
+    let pointAtten = select(
+        1.0,
+        clamp(1.0 - (lightDist / max(commonUniforms.lightColor.a, 1.0)), 0.0, 1.0),
+        !isDirectional && commonUniforms.lightColor.a > 0.0
+    );
 
     var output: VertexOutput;
     output.position = commonUniforms.projMat * commonUniforms.viewMat * worldPos;
@@ -125,7 +151,7 @@ fn mainVert(input: VertexInput) -> VertexOutput {
     } else {
         output.vTexCoord0 = input.aTexCoord0;
     }
-    output.vLighting = vec3<f32>(0.2) + (commonUniforms.lightColor.rgb * ndotl);
+    output.vLighting = vec3<f32>(0.2) + (commonUniforms.lightColor.rgb * ndotl * pointAtten);
     return output;
 }
 

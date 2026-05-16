@@ -478,13 +478,22 @@ public:
    
    slm::vec4 mLightColor;
    slm::vec3 mLightPos;
+   slm::vec3 mAppliedLightPos;
+   float mAppliedLightRange;
    bool mLightFollowsCamera;
+   bool mDirectionalLight;
+   bool mScaleLightByShapeRadius;
+   float mLightRadiusScale;
    
    GenericViewer() : mResourceManager(NULL), mPalette(NULL), mMaterialList(NULL)
    {
       useShared = false;
       mResourceMount = -1;
       mLightFollowsCamera = false;
+      mDirectionalLight = false;
+      mScaleLightByShapeRadius = false;
+      mLightRadiusScale = 1.0f;
+      mAppliedLightRange = 0.0f;
    }
 
    void setResourcePath(const char* filename, int32_t forceMount = -1)
@@ -507,7 +516,39 @@ public:
    void updateMVP()
    {
       GFXSetModelViewProjection(mModelMatrix, mViewMatrix, mProjectionMatrix);
-      GFXSetLightPos(mLightPos, mLightColor);
+      GFXSetLightPos(mAppliedLightPos, slm::vec4(mLightColor.x, mLightColor.y, mLightColor.z, mAppliedLightRange), mDirectionalLight);
+   }
+
+   static slm::vec3 normalizeOrDefault(const slm::vec3& v, const slm::vec3& fallback)
+   {
+      const float lenSq = v.x * v.x + v.y * v.y + v.z * v.z;
+      if (lenSq <= 1e-8f)
+         return fallback;
+      const float invLen = 1.0f / std::sqrt(lenSq);
+      return slm::vec3(v.x * invLen, v.y * invLen, v.z * invLen);
+   }
+
+   void updateLightForShape(const Dts3::Shape* shape)
+   {
+      const float shapeRadius = (shape != NULL) ? std::max(shape->mRadius, 1.0f) : 1.0f;
+      const slm::vec3 baseLight = normalizeOrDefault(mLightPos, slm::vec3(0.0f, -1.0f, 1.0f));
+
+      if (mDirectionalLight)
+      {
+         mAppliedLightPos = baseLight;
+         mAppliedLightRange = 0.0f;
+         return;
+      }
+
+      if (mScaleLightByShapeRadius)
+      {
+         mAppliedLightPos = mLightPos;
+         mAppliedLightRange = std::max(shapeRadius * mLightRadiusScale, 1.0f);
+         return;
+      }
+
+      mAppliedLightPos = mLightPos;
+      mAppliedLightRange = 0.0f;
    }
 
    static bool hasRecognizedTextureExtension(const fs::path& path)
@@ -1158,6 +1199,8 @@ public:
    {
       mLightColor = slm::vec4(1,1,1,1);
       mLightPos = slm::vec3(0,-2, 2);
+      mAppliedLightPos = mLightPos;
+      mAppliedLightRange = 0.0f;
       if (mShape == NULL)
          return;
       
@@ -3997,7 +4040,24 @@ public:
       mViewer.mProjectionMatrix = slm::perspective_fov_rh( slm::radians(90.0), (float)w/(float)h, 0.01f, 10000.0f);
       mViewer.mDebugRenderDecals = mDebugRenderDecals;
       if (mViewer.mLightFollowsCamera)
-         mViewer.mLightPos = mViewPos;
+      {
+         if (mViewer.mDirectionalLight)
+         {
+            const slm::mat4 invView = inverse(mViewer.mViewMatrix);
+            const slm::vec3 forwardDir = (invView * slm::vec4(0.0f, 1.0f, 0.0f, 0.0f)).xyz();
+            mViewer.mAppliedLightPos = GenericViewer::normalizeOrDefault(forwardDir, slm::vec3(0.0f, 1.0f, 0.0f));
+            mViewer.mAppliedLightRange = 0.0f;
+         }
+         else
+         {
+            mViewer.mAppliedLightPos = mViewPos;
+            mViewer.mAppliedLightRange = mViewer.mScaleLightByShapeRadius
+               ? std::max(std::max((mShape != NULL) ? mShape->mRadius : 1.0f, 1.0f) * mViewer.mLightRadiusScale, 1.0f)
+               : 0.0f;
+         }
+      }
+      else
+         mViewer.updateLightForShape(mShape);
       
       if (!mManualThreads)
          mViewer.advanceThreads(dt);
@@ -4104,17 +4164,17 @@ public:
       }
       ImGui::Separator();
       ImGui::TextUnformatted("Lighting");
+      ImGui::Checkbox("Directional Light", &mViewer.mDirectionalLight);
       ImGui::Checkbox("Follow Camera", &mViewer.mLightFollowsCamera);
-      if (mViewer.mLightFollowsCamera)
-      {
-         ImGui::BeginDisabled();
-         ImGui::DragFloat3("Light Position", &mViewer.mLightPos.x, 0.05f);
-         ImGui::EndDisabled();
-      }
+      ImGui::Checkbox("Scale Light Radius With Shape Radius", &mViewer.mScaleLightByShapeRadius);
+      ImGui::SliderFloat("Radius Scale", &mViewer.mLightRadiusScale, 0.01f, 4.0f);
+      if (mViewer.mDirectionalLight)
+         ImGui::TextUnformatted("Light Direction (world)");
       else
-      {
-         ImGui::DragFloat3("Light Position", &mViewer.mLightPos.x, 0.05f);
-      }
+         ImGui::TextUnformatted("Light Position (world)");
+      ImGui::DragFloat3("##LightVector", &mViewer.mLightPos.x, 0.05f);
+      if (mViewer.mLightFollowsCamera)
+         ImGui::TextUnformatted(mViewer.mDirectionalLight ? "Locked to camera direction" : "Locked to camera position");
       ImGui::ColorEdit3("Light Color", &mViewer.mLightColor.x);
       float lightIntensity = std::max({mViewer.mLightColor.x, mViewer.mLightColor.y, mViewer.mLightColor.z, 0.0f});
       if (ImGui::SliderFloat("Light Intensity", &lightIntensity, 0.0f, 8.0f))
@@ -4147,6 +4207,11 @@ public:
       {
          mViewer.mLightPos = slm::vec3(0, -2, 2);
          mViewer.mLightColor = slm::vec4(1, 1, 1, 1);
+         mViewer.mDirectionalLight = false;
+         mViewer.mLightFollowsCamera = false;
+         mViewer.mScaleLightByShapeRadius = false;
+         mViewer.mLightRadiusScale = 1.0f;
+         mViewer.mAppliedLightRange = 0.0f;
       }
       ImGui::Checkbox("Render Nodes", &mRenderNodes);
       ImGui::Checkbox("Debug Render Decals", &mDebugRenderDecals);
