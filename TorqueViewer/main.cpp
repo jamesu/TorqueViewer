@@ -68,6 +68,44 @@ static void browserBuildProbe()
 {
    emscripten_console_error("build probe: __EMSCRIPTEN__=1 EMSCRIPTEN_BUILD=1 EMSCRIPTEN_USE_SDL3=1");
 }
+
+extern "C" EMSCRIPTEN_KEEPALIVE void browserOnResourceImported(const char* path);
+
+EM_JS(void, browserShowImportDialog, (), {
+   if (!window.__tvImportInput) {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.style.display = 'none';
+      input.addEventListener('change', async function() {
+         const files = input.files;
+         if (!files || files.length === 0)
+            return;
+
+         if (typeof FS !== 'undefined' && !FS.analyzePath('/in').exists) {
+            FS.mkdir('/in');
+         }
+
+         for (let i = 0; i < files.length; ++i) {
+            const file = files[i];
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            const path = '/in/' + file.name;
+            FS.writeFile(path, bytes);
+
+            const len = lengthBytesUTF8(path) + 1;
+            const ptr = _malloc(len);
+            stringToUTF8(path, ptr, len);
+            Module._browserOnResourceImported(ptr);
+            _free(ptr);
+         }
+
+         input.value = "";
+      });
+      document.body.appendChild(input);
+      window.__tvImportInput = input;
+   }
+   window.__tvImportInput.click();
+});
 #endif
 
 static bool readDTSHeaderVersion(const fs::path& path, uint32_t& outRawHeader, uint32_t& outVersion, uint32_t& outExporterVersion)
@@ -723,6 +761,12 @@ public:
          }
       }
    }
+
+   void reloadMaterials()
+   {
+      clearTextures();
+      initMaterials();
+   }
    
    bool loadSharedMaterials()
    {
@@ -1051,6 +1095,8 @@ public:
             updateMem = NULL;
          }
          texID = -1;
+         memoryUsed = 0;
+         memorySize = 0;
       }
       
       uint32_t getRequiredDim()
@@ -1069,7 +1115,7 @@ public:
       
       void ensureValid(uint32_t initialTransformSize, T* initialMem)
       {
-         if (memoryUsed > memorySize)
+         if (texID < 0 || updateMem == NULL || memoryUsed > memorySize)
          {
             uint32_t pow2Size = getRequiredDim();
             
@@ -2815,6 +2861,13 @@ public:
          if (mCurrentDetail >= 0)
             animate(mShape->mDetailLevels[mCurrentDetail]);
       }
+
+      if (mShape->mSequences.empty())
+      {
+         mNodeTransforms = mDefaultNodeTransforms;
+      }
+
+      updateTransformTexture();
    }
    
    void initShapeObjects()
@@ -3751,33 +3804,33 @@ public:
       }
    }
    
-   void loadShape(const char *filename, int pathIdx=-1)
+   bool loadShape(const char *filename, int pathIdx=-1)
    {
-      mSequenceList.clear();
-      mNextSequence.clear();
-      mHighlightNodeIdx = -1;
-      mSelectedMaterialIdx = 0;
-      mSelectedObjectIdx = 0;
-      mRemoveThreadId = -1;
-      mRenderNodes = true;
-      mManualThreads = false;
-      mDebugRenderDecals = false;
-      mDebugRenderNormals = false;
-      mDisableLighting = false;
-      mViewer.mDirectionalLight = true;
-      mViewer.mLightFollowsCamera = true;
-      mViewer.clear();
-      if (mShape)
-         delete mShape;
-      mShape = NULL;
-      
       ResourceInstance* inst = mViewer.mResourceManager->createResource(filename, pathIdx);
-      
       if (inst)
       {
          Dts3::Shape* shape = (Dts3::Shape*)inst;
-         mShape = shape;
+
          mViewer.clear();
+         if (mShape)
+            delete mShape;
+         mShape = NULL;
+
+         mSequenceList.clear();
+         mNextSequence.clear();
+         mHighlightNodeIdx = -1;
+         mSelectedMaterialIdx = 0;
+         mSelectedObjectIdx = 0;
+         mRemoveThreadId = -1;
+         mRenderNodes = true;
+         mManualThreads = false;
+         mDebugRenderDecals = false;
+         mDebugRenderNormals = false;
+         mDisableLighting = false;
+         mViewer.mDirectionalLight = true;
+         mViewer.mLightFollowsCamera = true;
+
+         mShape = shape;
          mViewer.setResourcePath(filename, pathIdx);
          mViewer.loadShape(*mShape);
          mDetailDist = std::max<float>((float)mViewer.mCurrentDetail, 0.0f);
@@ -3788,7 +3841,10 @@ public:
          const float viewDist = std::max(mViewer.mShape->mRadius * 2.0f, 1.0f);
          mViewPos = mViewer.mShape->mCenter + slm::vec3(0.0f, -viewDist, 0.0f);
          mCamRot = slm::vec3(0.0f, 0.0f, 0.0f);
+         return true;
       }
+
+      return false;
    }
 
    bool loadDSQ(const char *filename, int pathIdx=-1)
@@ -4527,6 +4583,7 @@ struct MainState
    std::vector<const char*> cFileList;
    std::vector<std::string> sFileList;
    std::vector<const char*> cVolumeList;
+   std::vector<std::string> mPendingBrowserImports;
    
    int oldSelectedVolumeIdx;
    int oldSelectedFileIdx;
@@ -4552,6 +4609,115 @@ struct MainState
       
       testPos = slm::vec3(0);
    }
+
+   int findMountIndex(const char* mountName) const
+   {
+      if (mountName == NULL)
+         return -1;
+
+      for (int i = 0; i < (int)resManager.mPaths.size(); ++i)
+      {
+         if (resManager.mPaths[i] == mountName)
+            return i;
+      }
+      return -1;
+   }
+
+   void refreshResourceLists()
+   {
+      fileList.clear();
+      resManager.enumerateFiles(fileList, selectedVolumeIdx, &restrictExtList);
+      sFileList.resize(fileList.size());
+      cFileList.clear();
+      for (int i = 0; i < (int)fileList.size(); i++)
+      {
+         sFileList[i] = fileList[i].filename;
+      }
+      for (int i = 0; i < (int)fileList.size(); i++)
+      {
+         cFileList.push_back(sFileList[i].c_str());
+      }
+
+      cVolumeList.clear();
+      resManager.enumerateSearchPaths(cVolumeList);
+   }
+
+   static bool isTextureFileExtension(const fs::path& path)
+   {
+      std::string ext = path.extension().string();
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+      return ext == ".bmp" || ext == ".gif" || ext == ".png" || ext == ".jpg" || ext == ".jpeg";
+   }
+
+   void ensureBrowserResourcePath()
+   {
+#if defined(EMSCRIPTEN_BUILD)
+      if (!fs::exists("/in"))
+         fs::create_directories("/in");
+      if (std::find(resManager.mPaths.begin(), resManager.mPaths.end(), "/in") == resManager.mPaths.end())
+         resManager.mPaths.insert(resManager.mPaths.begin(), "/in");
+#endif
+   }
+
+   void queueBrowserImport(const char* path)
+   {
+      if (path && *path)
+         mPendingBrowserImports.emplace_back(path);
+   }
+
+   void processBrowserImports()
+   {
+#if defined(EMSCRIPTEN_BUILD)
+      if (mPendingBrowserImports.empty())
+         return;
+
+      int32_t newSelection = selectedVolumeIdx;
+      bool changed = false;
+      bool textureImport = false;
+
+      for (const std::string& importPath : mPendingBrowserImports)
+      {
+         fs::path importFile(importPath);
+         std::string ext = importFile.extension().string();
+         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+         if (ext == ".zip" || ext == ".vl2")
+         {
+            const size_t oldVolumeCount = resManager.mVolumes.size();
+            resManager.addVolume(importPath.c_str());
+            if (resManager.mVolumes.size() > oldVolumeCount)
+            {
+               newSelection = (int32_t)resManager.mPaths.size() + (int32_t)oldVolumeCount;
+               changed = true;
+            }
+            continue;
+         }
+
+         changed = true;
+         if (isTextureFileExtension(importFile))
+            textureImport = true;
+         newSelection = findMountIndex("/in");
+      }
+
+      mPendingBrowserImports.clear();
+
+      if (changed)
+      {
+         ensureBrowserResourcePath();
+         selectedVolumeIdx = newSelection;
+         oldSelectedVolumeIdx = selectedVolumeIdx;
+         oldSelectedFileIdx = -1;
+         refreshResourceLists();
+         selectedFileIdx = -1;
+
+         if (textureImport && shapeController->isResourceLoaded())
+         {
+            shapeController->mViewer.reloadMaterials();
+            shapeController->mViewer.refreshRenderStateAfterSequenceImport();
+         }
+      }
+#endif
+   }
    
    void init(SDL_Window* in_window, int argc, const char** argv)
    {
@@ -4575,6 +4741,13 @@ struct MainState
 };
 
 static MainState gMainState;
+
+#if defined(EMSCRIPTEN_BUILD)
+extern "C" EMSCRIPTEN_KEEPALIVE void browserOnResourceImported(const char* path)
+{
+   gMainState.queueBrowserImport(path);
+}
+#endif
 
 
 template<class T> static ResourceInstance* _createClass() { return new T(); }
@@ -4733,6 +4906,12 @@ int MainState::boot()
    currentController = shapeController;
    std::string dumpObjPath;
    std::string dumpPackedObjPath;
+
+#if defined(EMSCRIPTEN_BUILD)
+   ensureBrowserResourcePath();
+   if (selectedVolumeIdx < 0)
+      selectedVolumeIdx = findMountIndex("/in");
+#endif
    
    for (int i=1; i<in_argc; i++)
    {
@@ -4801,16 +4980,32 @@ int MainState::boot()
       
       if (ext == ".dts")
       {
-         shapeController->loadShape(path);
-         currentController = shapeController;
+         if (shapeController->loadShape(path))
+            currentController = shapeController;
       }
       else if (ext == ".dsq")
       {
-         if (!shapeController->loadDSQ(path))
+         if (!shapeController->isResourceLoaded())
+         {
+            fs::path dtsPath = filePath;
+            dtsPath.replace_extension(".dts");
+            if (!shapeController->loadShape(dtsPath.generic_string().c_str(), -1) ||
+                !shapeController->loadDSQ(path))
+            {
+               fprintf(stderr, "failed to bootstrap shape for DSQ '%s'\n", path);
+               continue;
+            }
+            currentController = shapeController;
+         }
+         else if (!shapeController->loadDSQ(path))
          {
             return 1;
          }
          currentController = shapeController;
+      }
+      else if (isTextureFileExtension(filePath))
+      {
+         continue;
       }
       else if (ext == ".dif")
       {
@@ -4851,32 +5046,29 @@ int MainState::boot()
    deltaMovement = slm::vec3(0);
    deltaRot = slm::vec3(0);
    lastTicks = SDL_GetTicks();
+
+   selectedFileIdx = -1;
+   selectedVolumeIdx = -1;
+   restrictExtList.clear();
+   restrictExtList.push_back(".dts");
+   restrictExtList.push_back(".dsq");
+   restrictExtList.push_back(".dif");
+   restrictExtList.push_back(".ter");
+#if defined(EMSCRIPTEN_BUILD)
+   restrictExtList.push_back(".bmp");
+   restrictExtList.push_back(".gif");
+   restrictExtList.push_back(".png");
+   restrictExtList.push_back(".jpg");
+   restrictExtList.push_back(".jpeg");
+#endif
+   ensureBrowserResourcePath();
+#if defined(EMSCRIPTEN_BUILD)
+   selectedVolumeIdx = findMountIndex("/in");
+#endif
+   refreshResourceLists();
    
-      selectedFileIdx = -1;
-      selectedVolumeIdx = -1;
-      restrictExtList.clear();
-      fileList.clear();
-      restrictExtList.push_back(".dts");
-      restrictExtList.push_back(".dsq");
-      restrictExtList.push_back(".dif");
-      restrictExtList.push_back(".ter");
-      resManager.enumerateFiles(fileList, selectedVolumeIdx, &restrictExtList);
-      sFileList.resize(fileList.size());
-   
-   for (int i=0; i<fileList.size(); i++)
-   {
-      sFileList[i] = fileList[i].filename;
-   }
-   
-   for (int i=0; i<fileList.size(); i++)
-   {
-      cFileList.push_back(sFileList[i].c_str());
-   }
-   
-   resManager.enumerateSearchPaths(cVolumeList);
-   
-   oldSelectedVolumeIdx = -1;
-   oldSelectedFileIdx = -1;
+   oldSelectedVolumeIdx = selectedVolumeIdx;
+   oldSelectedFileIdx = selectedFileIdx;
    
    return 0;
 }
@@ -4885,6 +5077,8 @@ int MainState::loop()
 {
    if (!running)
       return 1;
+   
+   processBrowserImports();
    
    ImGui::StyleColorsDark();
    
@@ -4910,21 +5104,8 @@ int MainState::loop()
    
    if (oldSelectedVolumeIdx != selectedVolumeIdx)
    {
-      fileList.clear();
-      resManager.enumerateFiles(fileList, selectedVolumeIdx, &restrictExtList);
       oldSelectedVolumeIdx = selectedVolumeIdx;
-      
-      cFileList.clear();
-      sFileList.resize(fileList.size());
-      for (int i=0; i<fileList.size(); i++)
-      {
-         sFileList[i] = fileList[i].filename;
-      }
-      for (int i=0; i<fileList.size(); i++)
-      {
-         cFileList.push_back(sFileList[i].c_str());
-      }
-      
+      refreshResourceLists();
       oldSelectedFileIdx = selectedFileIdx = -1;
    }
    
@@ -4945,7 +5126,22 @@ int MainState::loop()
       }
       else if (ext == ".dsq")
       {
-         if (!shapeController->loadDSQ(cFileList[selectedFileIdx], selectedVolumeIdx))
+         if (!shapeController->isResourceLoaded())
+         {
+            fs::path dtsPath = filePath;
+            dtsPath.replace_extension(".dts");
+            if (!shapeController->loadShape(dtsPath.generic_string().c_str(), selectedVolumeIdx) ||
+                !shapeController->loadDSQ(cFileList[selectedFileIdx], selectedVolumeIdx))
+            {
+               fprintf(stderr, "failed to bootstrap shape for DSQ from browser: %s\n", cFileList[selectedFileIdx]);
+               oldSelectedFileIdx = selectedFileIdx;
+            }
+            else
+            {
+               currentController = shapeController;
+            }
+         }
+         else if (!shapeController->loadDSQ(cFileList[selectedFileIdx], selectedVolumeIdx))
          {
             fprintf(stderr, "failed to load DSQ from browser: %s\n", cFileList[selectedFileIdx]);
          }
@@ -4954,13 +5150,18 @@ int MainState::loop()
             currentController = shapeController;
          }
       }
+      else if (isTextureFileExtension(filePath))
+      {
+         oldSelectedFileIdx = selectedFileIdx;
+      }
       else
       {
-         shapeController->loadShape(cFileList[selectedFileIdx], selectedVolumeIdx);
-         currentController = shapeController;
+         if (shapeController->loadShape(cFileList[selectedFileIdx], selectedVolumeIdx))
+            currentController = shapeController;
       }
 
-      oldSelectedFileIdx = selectedFileIdx;
+      selectedFileIdx = -1;
+      oldSelectedFileIdx = -1;
    }
    
    while (SDL_PollEvent(&event))
@@ -5013,6 +5214,14 @@ int MainState::loop()
       currentController->update(dt);
       
       ImGui::Begin("Browse");
+#if defined(EMSCRIPTEN_BUILD)
+      if (ImGui::Button("Load shape/file"))
+      {
+         browserShowImportDialog();
+      }
+      ImGui::SameLine();
+      ImGui::TextUnformatted("Imports go to /in/");
+#endif
       if (cVolumeList.empty() && cFileList.empty())
       {
          ImGui::TextUnformatted("No resources mounted yet.");

@@ -146,6 +146,7 @@ if (EMSCRIPTEN)
     target_link_options(TorqueViewer PRIVATE
         "--use-port=sdl3"
         "--use-port=emdawnwebgpu"
+        "-sEXPORTED_FUNCTIONS=['_main','_browserOnResourceImported','_malloc','_free']"
         "-gsource-map"
         "-g2"
     )
