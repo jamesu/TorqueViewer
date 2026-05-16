@@ -29,6 +29,10 @@ generate_escaped_string_header("TorqueViewer/terrainShader.wgsl" "${CMAKE_BINARY
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(APPLE AND NOT EMSCRIPTEN)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.3.1" CACHE STRING "Minimum macOS deployment target" FORCE)
+endif()
+
 # Specify the include directories
 include_directories(include imgui include/slm TorqueViewer "${CMAKE_BINARY_DIR}")
 
@@ -134,6 +138,12 @@ file(GLOB TRIBESVIEWER_SRC
 
 # Add executable
 add_executable(TorqueViewer ${TRIBESVIEWER_SRC})
+
+if(APPLE AND NOT EMSCRIPTEN)
+    set_target_properties(TorqueViewer PROPERTIES
+        XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    )
+endif()
 
 # Link SDL3
 if (EMSCRIPTEN)
