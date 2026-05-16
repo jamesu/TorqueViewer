@@ -3855,6 +3855,8 @@ public:
          return false;
       }
 
+      const size_t oldSequenceCount = mShape->mSequences.size();
+
       MemRStream stream(0, NULL);
       if (!mViewer.mResourceManager->openFile(filename, stream, pathIdx))
       {
@@ -3873,6 +3875,15 @@ public:
       mSelectedMaterialIdx = 0;
       mSelectedObjectIdx = 0;
       rebuildSequenceUI();
+      if (mShape->mSequences.size() > oldSequenceCount)
+      {
+         const int32_t importedSequenceIdx = (int32_t)oldSequenceCount;
+         uint32_t threadIdx = 0;
+         if (mViewer.mThreads.empty())
+            threadIdx = mViewer.addThread();
+         mViewer.setThreadSequence(threadIdx, importedSequenceIdx, 0.0f);
+      }
+      updateNextSequence();
       return true;
    }
 
@@ -5112,7 +5123,8 @@ int MainState::loop()
    if (oldSelectedFileIdx != selectedFileIdx)
    {
       fs::path filePath = cFileList[selectedFileIdx];
-      std::string  ext = filePath.extension();
+      std::string ext = filePath.extension().string();
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
       
       if (ext == ".dif")
       {
