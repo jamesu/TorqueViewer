@@ -3726,6 +3726,17 @@ public:
    
    void loadShape(const char *filename, int pathIdx=-1)
    {
+      mSequenceList.clear();
+      mNextSequence.clear();
+      mHighlightNodeIdx = -1;
+      mSelectedMaterialIdx = 0;
+      mSelectedObjectIdx = 0;
+      mRemoveThreadId = -1;
+      mRenderNodes = true;
+      mManualThreads = false;
+      mDebugRenderDecals = false;
+      mDebugRenderNormals = false;
+      mDisableLighting = false;
       mViewer.clear();
       if (mShape)
          delete mShape;
@@ -4743,15 +4754,16 @@ int MainState::boot()
    deltaRot = slm::vec3(0);
    lastTicks = SDL_GetTicks();
    
-   selectedFileIdx = -1;
-   selectedVolumeIdx = -1;
-   restrictExtList.clear();
-   fileList.clear();
-   restrictExtList.push_back(".dts");
-   restrictExtList.push_back(".dif");
-   restrictExtList.push_back(".ter");
-   resManager.enumerateFiles(fileList, selectedVolumeIdx, &restrictExtList);
-   sFileList.resize(fileList.size());
+      selectedFileIdx = -1;
+      selectedVolumeIdx = -1;
+      restrictExtList.clear();
+      fileList.clear();
+      restrictExtList.push_back(".dts");
+      restrictExtList.push_back(".dsq");
+      restrictExtList.push_back(".dif");
+      restrictExtList.push_back(".ter");
+      resManager.enumerateFiles(fileList, selectedVolumeIdx, &restrictExtList);
+      sFileList.resize(fileList.size());
    
    for (int i=0; i<fileList.size(); i++)
    {
@@ -4832,6 +4844,17 @@ int MainState::loop()
       {
          //errainController->loadSingleBlock(cFileList[selectedFileIdx], selectedVolumeIdx);
          //currentController = terrainController;
+      }
+      else if (ext == ".dsq")
+      {
+         if (!shapeController->loadDSQ(cFileList[selectedFileIdx], selectedVolumeIdx))
+         {
+            fprintf(stderr, "failed to load DSQ from browser: %s\n", cFileList[selectedFileIdx]);
+         }
+         else
+         {
+            currentController = shapeController;
+         }
       }
       else
       {
