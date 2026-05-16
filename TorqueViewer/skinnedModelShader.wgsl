@@ -4,6 +4,7 @@ struct CommonUniforms {
     modelMat: mat4x4<f32>,
     params1: vec4<f32>,
     params2: vec4<f32>,
+    params3: vec4<f32>,
     lightPos: vec4<f32>,
     lightColor: vec4<f32>,
     squareTexCoords: array<vec4<f32>, 16>,
@@ -35,6 +36,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) vTexCoord0: vec2<f32>,
     @location(1) vLighting: vec3<f32>,
+    @location(2) vWorldNormal: vec3<f32>,
 };
 
 struct FragmentOutput {
@@ -62,6 +64,14 @@ fn loadTransformRow(transformIndex: u32, rowIndex: u32) -> vec4<f32> {
     return textureLoad(transformTex, getTransformTexelCoord(texelIndex), 0);
 }
 
+fn rowsToColumns(row0: vec3<f32>, row1: vec3<f32>, row2: vec3<f32>) -> mat3x3<f32> {
+    return mat3x3<f32>(
+        vec3<f32>(row0.x, row1.x, row2.x),
+        vec3<f32>(row0.y, row1.y, row2.y),
+        vec3<f32>(row0.z, row1.z, row2.z)
+    );
+}
+
 fn transformPoint(transformIndex: u32, position: vec3<f32>) -> vec3<f32> {
     let p = vec4<f32>(position, 1.0);
     let row0 = loadTransformRow(transformIndex, 0u);
@@ -74,7 +84,8 @@ fn transformNormal(transformIndex: u32, normal: vec3<f32>) -> vec3<f32> {
     let row0 = loadTransformRow(transformIndex, 0u).xyz;
     let row1 = loadTransformRow(transformIndex, 1u).xyz;
     let row2 = loadTransformRow(transformIndex, 2u).xyz;
-    return vec3<f32>(dot(row0, normal), dot(row1, normal), dot(row2, normal));
+    let basis = rowsToColumns(row0, row1, row2);
+    return inverse3x3(basis) * normal;
 }
 
 fn applySkinBlock(
@@ -152,11 +163,18 @@ fn mainVert(input: VertexInput) -> VertexOutput {
         output.vTexCoord0 = input.aTexCoord0;
     }
     output.vLighting = vec3<f32>(0.2) + (commonUniforms.lightColor.rgb * ndotl * pointAtten);
+    output.vWorldNormal = worldNormal;
     return output;
 }
 
 @fragment
 fn mainFrag(input: VertexOutput) -> FragmentOutput {
+    if (commonUniforms.params2.z > 1.5) {
+        var debugOut: FragmentOutput;
+        debugOut.Color = vec4<f32>(normalize(input.vWorldNormal) * 0.5 + vec3<f32>(0.5), 1.0);
+        return debugOut;
+    }
+
     if (commonUniforms.params2.z > 0.5) {
         var debugOut: FragmentOutput;
         debugOut.Color = commonUniforms.squareTexCoords[2];
@@ -164,7 +182,7 @@ fn mainFrag(input: VertexOutput) -> FragmentOutput {
     }
 
     let texColor = textureSample(diffuseTex, diffuseSampler, input.vTexCoord0);
-    let lighting = select(input.vLighting, vec3<f32>(1.0), commonUniforms.params2.x > 0.5);
+    let lighting = select(input.vLighting, vec3<f32>(1.0), (commonUniforms.params3.x > 0.5) || (commonUniforms.params3.y > 0.5));
 
     //if (texColor.a < commonUniforms.params2.x) {
     //    discard;

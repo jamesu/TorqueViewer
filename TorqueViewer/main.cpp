@@ -183,6 +183,113 @@ void CompatQuatSetMatrix(const slm::quat rot, slm::mat4 &outMat)
    outMat = slm::mat4(slm::conjugate(rot));
 }
 
+static bool meshNormalsAreUniform(const Dts3::BasicData& data)
+{
+   if (data.normals.empty() || data.normals.size() != data.verts.size())
+      return false;
+
+   const slm::vec3 ref = data.normals.front();
+   for (const slm::vec3& normal : data.normals)
+   {
+      if (slm::length(normal - ref) > 1e-5f)
+         return false;
+   }
+   return true;
+}
+
+static void addFaceNormal(std::vector<slm::vec3>& accum, const std::vector<slm::vec3>& verts, uint16_t i0, uint16_t i1, uint16_t i2)
+{
+   if (i0 >= verts.size() || i1 >= verts.size() || i2 >= verts.size())
+      return;
+
+   const slm::vec3 edge0 = verts[i1] - verts[i0];
+   const slm::vec3 edge1 = verts[i2] - verts[i0];
+   const slm::vec3 faceNormal = slm::cross(edge0, edge1);
+   if (slm::dot(faceNormal, faceNormal) <= 1e-20f)
+      return;
+
+   accum[i0] += faceNormal;
+   accum[i1] += faceNormal;
+   accum[i2] += faceNormal;
+}
+
+static bool rebuildSmoothNormals(Dts3::BasicData& data)
+{
+   if (data.verts.empty() || data.primitives.empty() || data.indices.empty())
+      return false;
+
+   std::vector<slm::vec3> accum(data.verts.size(), slm::vec3(0.0f));
+   bool sawFace = false;
+
+   for (const Dts3::Primitive& prim : data.primitives)
+   {
+      const uint32_t firstElement = prim.firstElement;
+      const uint32_t numElements = prim.numElements;
+      if (firstElement >= data.indices.size() || firstElement + numElements > data.indices.size())
+         continue;
+
+      const uint32_t primType = uint32_t(prim.matIndex) & Dts3::Primitive::TypeMask;
+      if (primType == Dts3::Primitive::Strip)
+      {
+         if (numElements < 3)
+            continue;
+         for (uint32_t tri = 0; tri + 2 < numElements; ++tri)
+         {
+            uint16_t i0 = data.indices[firstElement + tri];
+            uint16_t i1 = data.indices[firstElement + tri + 1];
+            uint16_t i2 = data.indices[firstElement + tri + 2];
+            if ((tri & 1) != 0)
+               std::swap(i0, i1);
+            addFaceNormal(accum, data.verts, i0, i1, i2);
+            sawFace = true;
+         }
+      }
+      else if (primType == Dts3::Primitive::Fan)
+      {
+         if (numElements < 3)
+            continue;
+         const uint16_t center = data.indices[firstElement];
+         for (uint32_t tri = 1; tri + 1 < numElements; ++tri)
+         {
+            addFaceNormal(accum,
+                          data.verts,
+                          center,
+                          data.indices[firstElement + tri],
+                          data.indices[firstElement + tri + 1]);
+            sawFace = true;
+         }
+      }
+      else
+      {
+         for (uint32_t tri = 0; tri + 2 < numElements; tri += 3)
+         {
+            addFaceNormal(accum,
+                          data.verts,
+                          data.indices[firstElement + tri],
+                          data.indices[firstElement + tri + 1],
+                          data.indices[firstElement + tri + 2]);
+            sawFace = true;
+         }
+      }
+   }
+
+   if (!sawFace)
+      return false;
+
+   std::vector<slm::vec3> newNormals = data.normals;
+   if (newNormals.size() != data.verts.size())
+      newNormals.resize(data.verts.size(), slm::vec3(0.0f));
+
+   for (size_t i = 0; i < accum.size(); ++i)
+   {
+      if (slm::dot(accum[i], accum[i]) > 1e-20f)
+         newNormals[i] = slm::normalize(accum[i]);
+   }
+
+   data.normals.swap(newNormals);
+   return true;
+}
+
 
 #include "CommonData.h"
 
@@ -903,6 +1010,8 @@ public:
    int32_t mCurrentDetail;
    uint32_t mTriggerStateFlags;
    bool mDebugRenderDecals;
+   bool mDebugRenderNormals;
+   bool mDisableLighting;
    
    std::vector<bool> mThreadActive;
    uint32_t mBaseTextureTransform;
@@ -1026,6 +1135,8 @@ public:
       mResourceManager = res;
       initVB = false;
       mDebugRenderDecals = false;
+      mDebugRenderNormals = false;
+      mDisableLighting = false;
       mScaleMode = ScaleMode::None;
    }
    
@@ -1061,6 +1172,7 @@ public:
       mGroundThreadIdx = -1;
       mCurrentDetail = -1;
       mTriggerStateFlags = 0;
+      mDisableLighting = false;
       
       clearVertexBuffer();
       clearTextures();
@@ -1914,6 +2026,32 @@ public:
          animate(mShape->mDetailLevels[mCurrentDetail]);
       }
       updateTransformTexture();
+   }
+
+   size_t recalculateSmoothNormalsForFlatMeshes()
+   {
+      if (!mShape)
+         return 0;
+
+      size_t changedMeshes = 0;
+      for (Dts3::Mesh& mesh : mShape->mMeshes)
+      {
+         Dts3::BasicData* data = mesh.getBasicData();
+         if (!data || !meshNormalsAreUniform(*data))
+            continue;
+
+         if (rebuildSmoothNormals(*data))
+            changedMeshes++;
+      }
+
+      if (changedMeshes > 0)
+      {
+         initVertexBuffer();
+         setDirty(RuntimeSubShapeInfo::AllDirty);
+      }
+
+      fprintf(stderr, "normal recalc: updatedMeshes=%zu\n", changedMeshes);
+      return changedMeshes;
    }
 
    int32_t getNodeMatterIndex(const IntegerSet& matterSet, int32_t nodeIdx) const
@@ -3361,13 +3499,15 @@ public:
             haveBoundState = true;
          }
          GFXSetTSPipelineProps(binding.materialFrame,
-                              smi.mMeshTransformOffset,
-                              dd->texGenS[mi.mMeshFrame],
-                              dd->texGenT[mi.mMeshFrame],
-                              materialFlags,
-                              mDebugRenderDecals,
-                              slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
-                              1.0e-4f);
+                               smi.mMeshTransformOffset,
+                               dd->texGenS[mi.mMeshFrame],
+                               dd->texGenT[mi.mMeshFrame],
+                               materialFlags,
+                               mDebugRenderDecals,
+                               mDebugRenderNormals,
+                               mDisableLighting,
+                               slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
+                               1.0e-4f);
          
          assert(drawMode == Dts3::Primitive::Triangles);
          
@@ -3420,7 +3560,7 @@ public:
                currentGroupID = binding.textureGroupID;
                haveBoundState = true;
             }
-            GFXSetTSPipelineProps(binding.materialFrame, mi.mMeshTransformOffset, slm::vec4(0), slm::vec4(0), materialFlags);
+            GFXSetTSPipelineProps(binding.materialFrame, mi.mMeshTransformOffset, slm::vec4(0), slm::vec4(0), materialFlags, false, mDebugRenderNormals, mDisableLighting);
             
             assert(drawMode == Dts3::Primitive::Triangles);
             
@@ -3518,6 +3658,8 @@ public:
    bool mRenderNodes;
    bool mManualThreads;
    bool mDebugRenderDecals;
+   bool mDebugRenderNormals;
+   bool mDisableLighting;
    
    ShapeViewerController(SDL_Window* window, ResManager* mgr) :
    mViewer(mgr)
@@ -3536,6 +3678,8 @@ public:
       mRenderNodes = true;
       mManualThreads = false;
       mDebugRenderDecals = false;
+      mDebugRenderNormals = false;
+      mDisableLighting = false;
    }
    
    ~ShapeViewerController()
@@ -4039,6 +4183,8 @@ public:
       SDL_GetWindowSize(mWindow, &w, &h);
       mViewer.mProjectionMatrix = slm::perspective_fov_rh( slm::radians(90.0), (float)w/(float)h, 0.01f, 10000.0f);
       mViewer.mDebugRenderDecals = mDebugRenderDecals;
+      mViewer.mDebugRenderNormals = mDebugRenderNormals;
+      mViewer.mDisableLighting = mDisableLighting;
       if (mViewer.mLightFollowsCamera)
       {
          if (mViewer.mDirectionalLight)
@@ -4215,6 +4361,12 @@ public:
       }
       ImGui::Checkbox("Render Nodes", &mRenderNodes);
       ImGui::Checkbox("Debug Render Decals", &mDebugRenderDecals);
+      ImGui::Checkbox("Debug Normals", &mDebugRenderNormals);
+      ImGui::Checkbox("Disable Lighting", &mDisableLighting);
+      if (ImGui::Button("Force Normal Recalc"))
+      {
+         mViewer.recalculateSmoothNormalsForFlatMeshes();
+      }
       ImGui::End();
 
       renderMaterialDebugWindow();

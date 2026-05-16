@@ -4,6 +4,7 @@ struct CommonUniforms {
     modelMat: mat4x4<f32>,
     params1: vec4<f32>, // viewportScale.xy, lineWidth
     params2: vec4<f32>, // alphaTestF
+    params3: vec4<f32>, // material flags / debug toggles
     lightPos: vec4<f32>,
     lightColor: vec4<f32>,
 };
@@ -24,6 +25,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) vTexCoord0: vec2<f32>,
     @location(1) vLighting: vec3<f32>,
+    @location(2) vWorldNormal: vec3<f32>,
 };
 
 struct FragmentOutput {
@@ -69,12 +71,19 @@ fn mainVert(input: VertexInput) -> VertexOutput {
     output.position = mvpMat * vec4<f32>(input.aPosition, 1.0);
     output.vTexCoord0 = input.aTexCoord0;
     output.vLighting = vec3<f32>(0.2) + (commonUniforms.lightColor.rgb * ndotl * pointAtten);
+    output.vWorldNormal = normal;
 
     return output;
 }
 
 @fragment
 fn mainFrag(input: VertexOutput) -> FragmentOutput {
+    if (commonUniforms.params2.z > 1.5) {
+        var debugOut: FragmentOutput;
+        debugOut.Color = vec4<f32>(normalize(input.vWorldNormal) * 0.5 + vec3<f32>(0.5), 1.0);
+        return debugOut;
+    }
+
     var color: vec4<f32> = textureSample(texture0, sampler0, input.vTexCoord0);
 
     if (color.a > commonUniforms.params2.x) {
@@ -82,9 +91,10 @@ fn mainFrag(input: VertexOutput) -> FragmentOutput {
     }
 
     var outputColor: vec4<f32>;
-    outputColor.r = color.r * input.vLighting.r;
-    outputColor.g = color.g * input.vLighting.g;
-    outputColor.b = color.b * input.vLighting.b;
+    let lighting = select(input.vLighting, vec3<f32>(1.0), (commonUniforms.params3.x > 0.5) || (commonUniforms.params3.y > 0.5));
+    outputColor.r = color.r * lighting.r;
+    outputColor.g = color.g * lighting.g;
+    outputColor.b = color.b * lighting.b;
     outputColor.a = color.a;
 
     var out: FragmentOutput;

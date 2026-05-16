@@ -82,6 +82,7 @@ struct CommonUniformStruct
    slm::mat4 modelMat;
    slm::vec4 params1;
    slm::vec4 params2;
+   slm::vec4 params3;
    slm::vec4 lightPos;
    slm::vec4 lightColor;
    
@@ -2538,16 +2539,17 @@ void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID
    //wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 1, info.texBindGroup, 0, NULL);
 }
 
-void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT, uint32_t materialFlags, bool debugDecal, slm::vec4 debugColor, float clipDepthBias)
+void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT, uint32_t materialFlags, bool debugDecal, bool debugNormals, bool disableLighting, slm::vec4 debugColor, float clipDepthBias)
 {
    smState.modelProgram.uniforms.params1.x = (float)transformOffset;
    smState.modelProgram.uniforms.params1.y = 1.0f;
    smState.modelProgram.uniforms.params1.z = 1.0f;
    smState.modelProgram.uniforms.params1.w = (float)matFrame;
-   smState.modelProgram.uniforms.params2.x = (materialFlags & MaterialList::SelfIlluminating) ? 1.0f : 0.0f;
+   smState.modelProgram.uniforms.params3.x = (materialFlags & MaterialList::SelfIlluminating) ? 1.0f : 0.0f;
+   smState.modelProgram.uniforms.params3.y = disableLighting ? 1.0f : 0.0f;
    smState.modelProgram.uniforms.params2.y =
       (slm::length(texGenS) > 0.0f || slm::length(texGenT) > 0.0f) ? 1.0f : 0.0f;
-   smState.modelProgram.uniforms.params2.z = debugDecal ? 1.0f : 0.0f;
+   smState.modelProgram.uniforms.params2.z = debugNormals ? 2.0f : (debugDecal ? 1.0f : 0.0f);
    smState.modelProgram.uniforms.params2.w = clipDepthBias;
    smState.modelProgram.uniforms.squareTexCoords[0] = texGenS;
    smState.modelProgram.uniforms.squareTexCoords[1] = texGenT;
