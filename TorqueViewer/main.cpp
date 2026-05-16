@@ -1671,9 +1671,19 @@ public:
    
    void removeThread(uint32_t idx)
    {
+      if (idx >= mThreads.size())
+         return;
+
       Dts3::Thread& thread = mThreads[idx];
       clearTransition(thread);
       
+      thread.sequenceIdx = -1;
+      thread.pos = 0.0f;
+      thread.priority = 0;
+      thread.playing = false;
+      thread.timeScale = 0.0f;
+      thread.transitioning = false;
+      thread.transitionState = Dts3::ThreadTransitionState();
       mThreads[idx].index = -1;
       if (idx < mThreadActive.size())
          mThreadActive[idx] = false;
@@ -4256,6 +4266,9 @@ public:
       
       for (Dts3::Thread &thread : mViewer.mThreads)
       {
+         if (thread.index < 0)
+            continue;
+
          int32_t idx = &thread - &mViewer.mThreads[0];
          snprintf(buffer, 1024, "Thread %i", idx);
          
