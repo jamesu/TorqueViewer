@@ -34,11 +34,11 @@ include_directories(include imgui include/slm TorqueViewer "${CMAKE_BINARY_DIR}"
 
 # Emscripten builds use the browser WebGPU/SDL stack and should boot without native wgpu-native.
 if (EMSCRIPTEN)
-    set(TARGET_DEFINES ${TARGET_DEFINES} EMSCRIPTEN_BUILD)
+    list(APPEND TARGET_DEFINES EMSCRIPTEN_BUILD)
     set(TARGET_HEADER_SEARCH_PATHS
         ${TARGET_HEADER_SEARCH_PATHS}
     )
-    set(TARGET_DEFINES ${TARGET_DEFINES} EMSCRIPTEN_USE_SDL3)
+    list(APPEND TARGET_DEFINES EMSCRIPTEN_USE_SDL3)
     set(EMSCRIPTEN_CACHE_DIR "${CMAKE_BINARY_DIR}/emscripten-cache")
     set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CMAKE_COMMAND} -E env EM_CACHE=${EMSCRIPTEN_CACHE_DIR}")
     set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "${CMAKE_COMMAND} -E env EM_CACHE=${EMSCRIPTEN_CACHE_DIR}")
@@ -81,13 +81,13 @@ else()
     endif()
 endif()
 
-set(TARGET_DEFINES NO_BOOST)
+list(APPEND TARGET_DEFINES NO_BOOST)
 
 if (EMSCRIPTEN)
-set(TARGET_DEFINES ${TARGET_DEFINES} IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
+list(APPEND TARGET_DEFINES IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
 set(TARGET_LIBS ${TARGET_LIBS})
 elseif (USE_WGPU_NATIVE)
-set(TARGET_DEFINES ${TARGET_DEFINES} WGPU_NATIVE IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
+list(APPEND TARGET_DEFINES WGPU_NATIVE IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
 set(TARGET_HEADER_SEARCH_PATHS
 	${TARGET_HEADER_SEARCH_PATHS}
 	${WGPU_NATIVE_PATH}/ffi/webgpu-headers
@@ -111,7 +111,7 @@ endif()
 
 set(TARGET_LIBS ${TARGET_LIBS} ${WEBGPU_NATIVE_LIB_PATH})
 else()
-set(TARGET_DEFINES ${TARGET_DEFINES} WGPU_NATIVE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
+list(APPEND TARGET_DEFINES WGPU_NATIVE IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
 set(TARGET_LIBS ${TARGET_LIBS} webgpu)
 endif()
 
@@ -140,10 +140,14 @@ if (EMSCRIPTEN)
     target_compile_options(TorqueViewer PRIVATE
         "--use-port=sdl3"
         "--use-port=emdawnwebgpu"
+        "-gsource-map"
+        "-g2"
     )
     target_link_options(TorqueViewer PRIVATE
         "--use-port=sdl3"
         "--use-port=emdawnwebgpu"
+        "-gsource-map"
+        "-g2"
     )
     target_link_libraries(TorqueViewer ${SDL3_LIBS} ${TARGET_LIBS})
     set_target_properties(TorqueViewer PROPERTIES SUFFIX ".html")

@@ -35,6 +35,7 @@
 
 #if defined(EMSCRIPTEN_BUILD)
 #include <emscripten/emscripten.h>
+#include <emscripten/console.h>
 #endif
 
 #include "SDLCompat.h"
@@ -61,6 +62,13 @@ namespace fs = std::filesystem;
 // The max number of command buffers in flight
 static const uint32_t TVMaxBuffersInFlight = 3;
 static const slm::mat4 kTorqueZUpViewBasis = slm::rotation_x(slm::radians(-90.0f));
+
+#if defined(EMSCRIPTEN_BUILD)
+static void browserBuildProbe()
+{
+   emscripten_console_error("build probe: __EMSCRIPTEN__=1 EMSCRIPTEN_BUILD=1 EMSCRIPTEN_USE_SDL3=1");
+}
+#endif
 
 static bool readDTSHeaderVersion(const fs::path& path, uint32_t& outRawHeader, uint32_t& outVersion, uint32_t& outExporterVersion)
 {
@@ -4607,6 +4615,12 @@ int main(int argc, const char * argv[])
       return (1);
    }
    
+#if defined(EMSCRIPTEN_BUILD)
+   browserBuildProbe();
+   emscripten_console_error("TorqueViewer: browser startup reached main()");
+   SDL_SetHint(SDL_HINT_EMSCRIPTEN_CANVAS_SELECTOR, "canvas");
+#endif
+
    uint32_t windowFlags = SDL_WINDOW_RESIZABLE;
 #if defined(__APPLE__) && !defined(EMSCRIPTEN_BUILD)
    windowFlags |= SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY;

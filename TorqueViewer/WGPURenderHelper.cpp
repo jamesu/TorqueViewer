@@ -45,6 +45,10 @@
 
 #include "RendererHelper.h"
 
+#if defined(EMSCRIPTEN_BUILD)
+#include <emscripten/console.h>
+#endif
+
 
 extern "C"
 {
@@ -66,6 +70,18 @@ static constexpr WGPUOptionalBool WGPUOptionalBoolFromBool(bool value)
 {
    return value ? WGPUOptionalBool_True : WGPUOptionalBool_False;
 }
+
+#if defined(EMSCRIPTEN_BUILD)
+static void WebConsoleLog(const char* fmt, ...)
+{
+   char buffer[1024];
+   va_list args;
+   va_start(args, fmt);
+   vsnprintf(buffer, sizeof(buffer), fmt, args);
+   va_end(args);
+   emscripten_console_error(buffer);
+}
+#endif
 }
 
 static inline size_t AlignSize(const size_t size, const uint16_t alignment)
@@ -740,7 +756,7 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
       // Otherwise, try X11
 #elif defined(WIN32)
       smState.gpuBackendType = WGPUBackendType_Vulkan;
-#elif defined(EMSCRIPTEN)
+#elif defined(EMSCRIPTEN_BUILD)
       smState.gpuBackendType = WGPUBackendType_WebGPU;
 #else
       smState.gpuBackendType = WGPUBackendType_Undefined;
@@ -1112,24 +1128,31 @@ bool SDLState::initWGPUSurface()
       desc.nextInChain = (const WGPUChainedStruct*)&chainDescWIN32;
    }
    
-#elif defined(EMSCRIPTEN)
-   
-   WGPUSurfaceDescriptorFromCanvasHTMLSelector chainDescES = {};
+#elif defined(EMSCRIPTEN_BUILD)
+   WGPUEmscriptenSurfaceSourceCanvasHTMLSelector chainDescES = WGPU_EMSCRIPTEN_SURFACE_SOURCE_CANVAS_HTML_SELECTOR_INIT;
    
    {
-      cs.sType = WGPUSType_SurfaceDescriptorFromCanvasHTMLSelector;
+      cs.sType = WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector;
       
       chainDescES.chain = cs;
-      chainDescES.selector = "canvas";
+      chainDescES.selector = WGPUString("canvas");
       
+      desc = WGPU_SURFACE_DESCRIPTOR_INIT;
       desc.label = WGPUString("TorqueSurface");
-      desc.nextInChain = (const WGPUChainedStruct*)&chainDescES;
+      desc.nextInChain = &chainDescES.chain;
+
+#if defined(EMSCRIPTEN_BUILD)
+      WebConsoleLog("WebGPU surface: desc.nextInChain=%p chain=%p sType=%u selector=%s",
+                    (void*)desc.nextInChain, (void*)&chainDescES.chain, (unsigned)chainDescES.chain.sType, "canvas");
+#endif
    }
 #endif
    
    // Make surface
    
    gpuSurface = wgpuInstanceCreateSurface(gpuInstance, &desc);
+   if (!gpuSurface)
+      fprintf(stderr, "WebGPU surface creation failed for selector #canvas\n");
    return gpuSurface != NULL;
 }
 
