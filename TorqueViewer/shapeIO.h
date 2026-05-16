@@ -60,6 +60,24 @@ struct IO
       return -1;
    }
 
+   static int32_t findNodeByNameIndexOccurrence(const Shape* shape, int32_t nameIndex, int32_t occurrence)
+   {
+      if (nameIndex < 0 || occurrence < 0)
+         return -1;
+
+      for (uint32_t nodeIndex = 0; nodeIndex < shape->mNodes.size(); ++nodeIndex)
+      {
+         if (shape->mNodes[nodeIndex].name != nameIndex)
+            continue;
+
+         if (occurrence == 0)
+            return (int32_t)nodeIndex;
+         --occurrence;
+      }
+
+      return -1;
+   }
+
    static void buildTrackRemap(const IntegerSet& srcSet, IntegerSet& dstSet, std::vector<TrackRemap>& remap, const std::vector<int32_t>& nodeMap)
    {
       dstSet.reset();
@@ -145,14 +163,21 @@ struct IO
          return false;
 
       nodeMap.resize(importedNodeCount);
+      std::unordered_map<int32_t, int32_t> duplicateCounts;
       for (int32_t i = 0; i < importedNodeCount; ++i)
       {
          const std::size_t startSize = shape->mNameTable.size();
          const int32_t nameIndex = Sequence::readName(shape->mNameTable, stream, true);
-         nodeMap[i] = findNodeByNameIndex(shape, nameIndex);
-         if (nodeMap[i] < 0 && shape->mNameTable.size() > startSize)
+         int32_t occurrence = 0;
+         if (nameIndex >= 0)
+            occurrence = duplicateCounts[nameIndex]++;
+
+         nodeMap[i] = findNodeByNameIndexOccurrence(shape, nameIndex, occurrence);
+         if (nodeMap[i] < 0)
          {
-            shape->mNameTable.popBack();
+            if (shape->mNameTable.size() > startSize)
+               shape->mNameTable.popBack();
+            return false;
          }
       }
 
@@ -596,6 +621,9 @@ struct IO
       const int32_t groundBase = (int32_t)shape->mGroundTranslations.size();
       const int32_t nodeRotBase = (int32_t)shape->mNodeRotations.size();
       const int32_t nodeTransBase = (int32_t)shape->mNodeTranslations.size();
+      const int32_t adjNodeRots = nodeRotBase - (int32_t)nodeMap.size();
+      const int32_t adjNodeTrans = nodeTransBase - (int32_t)nodeMap.size();
+      const int32_t adjObjectStates = (int32_t)shape->mObjectStates.size() - oldShapeNumObjects;
 
       shape->mNodeRotations.insert(shape->mNodeRotations.end(),
                                    imported.rotations.begin(),
@@ -678,9 +706,9 @@ struct IO
                                                       seq.mattersMatframe.count());
             const int32_t numDecalTracks = (int32_t)seq.mattersDecal.count();
 
-            seq.baseRot = numNodeTracks ? keyframe.firstNodeState : 0;
+            seq.baseRot = numNodeTracks ? (keyframe.firstNodeState + adjNodeRots) : 0;
             seq.baseTrans = seq.baseRot;
-            seq.baseObjectState = numObjectTracks ? keyframe.firstObjectState : 0;
+            seq.baseObjectState = numObjectTracks ? (keyframe.firstObjectState + adjObjectStates) : 0;
             seq.baseDecalState = numDecalTracks ? keyframe.firstDecalState : 0;
 
             transposeLegacyTrackBlock(shape->mNodeRotations, (size_t)seq.baseRot, (size_t)seq.numKeyFrames, (size_t)numNodeTracks);
@@ -737,10 +765,38 @@ struct IO
       {
          return false;
       }
-      const int32_t objectStateBaseShift = (int32_t)shape->mObjectStates.size() - objectStateCount;
-      
+
+      const int32_t adjNodeRots = (int32_t)shape->mNodeRotations.size();
+      const int32_t adjNodeTrans = (int32_t)shape->mNodeTranslations.size();
+      const int32_t adjNodeScales1 = (int32_t)shape->mNodeUniformScales.size();
+      const int32_t adjNodeScales2 = (int32_t)shape->mNodeAlignedScales.size();
+      const int32_t adjNodeScales3 = (int32_t)shape->mNodeArbitraryScaleFactors.size();
+      const int32_t adjObjectStates = (int32_t)shape->mObjectStates.size() - oldShapeNumObjects;
       const int32_t triggerBase = (int32_t)shape->mTriggers.size();
       const int32_t groundBase = (int32_t)shape->mGroundTranslations.size();
+
+      shape->mNodeRotations.insert(shape->mNodeRotations.end(),
+                                   imported.rotations.begin(),
+                                   imported.rotations.end());
+      shape->mNodeTranslations.insert(shape->mNodeTranslations.end(),
+                                      imported.translations.begin(),
+                                      imported.translations.end());
+
+      if (fileVersion > 21)
+      {
+         shape->mNodeUniformScales.insert(shape->mNodeUniformScales.end(),
+                                          imported.uniformScales.begin(),
+                                          imported.uniformScales.end());
+         shape->mNodeAlignedScales.insert(shape->mNodeAlignedScales.end(),
+                                          imported.alignedScales.begin(),
+                                          imported.alignedScales.end());
+         shape->mNodeArbitraryScaleRotations.insert(shape->mNodeArbitraryScaleRotations.end(),
+                                                    imported.arbitraryScaleRotations.begin(),
+                                                    imported.arbitraryScaleRotations.end());
+         shape->mNodeArbitraryScaleFactors.insert(shape->mNodeArbitraryScaleFactors.end(),
+                                                  imported.arbitraryScaleFactors.begin(),
+                                                  imported.arbitraryScaleFactors.end());
+      }
 
       if (fileVersion > 21)
       {
@@ -757,9 +813,7 @@ struct IO
       {
          return false;
       }
-      
-      std::vector<ImportedSequenceMeta> importedSequenceMeta;
-      importedSequenceMeta.reserve(sequenceCount);
+      const size_t importedSequenceStart = shape->mSequences.size();
 
       for (int32_t sequenceIndex = 0; sequenceIndex < sequenceCount; ++sequenceIndex)
       {
@@ -768,12 +822,6 @@ struct IO
          {
             return false;
          }
-         
-         ImportedSequenceMeta meta;
-         meta.originalBaseRot = seq.baseRot;
-         meta.originalBaseTrans = seq.baseTrans;
-         meta.originalBaseScale = seq.baseScale;
-         meta.originalFirstGroundFrame = seq.firstGroundFrame;
 
          std::vector<TrackRemap> rotationRemap;
          std::vector<TrackRemap> translationRemap;
@@ -786,59 +834,38 @@ struct IO
          buildTrackRemap(seq.mattersTranslation, newMattersTranslation, translationRemap, nodeMap);
          buildTrackRemap(seq.mattersScale, newMattersScale, scaleRemap, nodeMap);
 
-         seq.baseRot = (int32_t)shape->mNodeRotations.size();
-         shape->mNodeRotations.resize(shape->mNodeRotations.size() + (rotationRemap.size() * (size_t)seq.numKeyFrames));
-         copyQuatTracks(shape->mNodeRotations, seq.baseRot, imported.rotations, meta.originalBaseRot, rotationRemap, seq.numKeyFrames);
-
-         seq.baseTrans = (int32_t)shape->mNodeTranslations.size();
-         shape->mNodeTranslations.resize(shape->mNodeTranslations.size() + (translationRemap.size() * (size_t)seq.numKeyFrames));
-         copyVec3Tracks(shape->mNodeTranslations, seq.baseTrans, imported.translations, meta.originalBaseTrans, translationRemap, seq.numKeyFrames);
-
-         seq.baseScale = -1;
-         if (seq.testFlags(Sequence::ArbitraryScale))
-         {
-            seq.baseScale = (int32_t)shape->mNodeArbitraryScaleFactors.size();
-            shape->mNodeArbitraryScaleRotations.resize(shape->mNodeArbitraryScaleRotations.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
-            shape->mNodeArbitraryScaleFactors.resize(shape->mNodeArbitraryScaleFactors.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
-            copyQuatTracks(shape->mNodeArbitraryScaleRotations, seq.baseScale, imported.arbitraryScaleRotations, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
-            copyVec3Tracks(shape->mNodeArbitraryScaleFactors, seq.baseScale, imported.arbitraryScaleFactors, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
-         }
-         else if (seq.testFlags(Sequence::AlignedScale))
-         {
-            seq.baseScale = (int32_t)shape->mNodeAlignedScales.size();
-            shape->mNodeAlignedScales.resize(shape->mNodeAlignedScales.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
-            copyVec3Tracks(shape->mNodeAlignedScales, seq.baseScale, imported.alignedScales, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
-         }
-         else if (seq.testFlags(Sequence::UniformScale))
-         {
-            seq.baseScale = (int32_t)shape->mNodeUniformScales.size();
-            shape->mNodeUniformScales.resize(shape->mNodeUniformScales.size() + (scaleRemap.size() * (size_t)seq.numKeyFrames));
-            copyFloatTracks(shape->mNodeUniformScales, seq.baseScale, imported.uniformScales, meta.originalBaseScale, scaleRemap, seq.numKeyFrames);
-         }
-
          seq.mattersRot = newMattersRot;
          seq.mattersTranslation = newMattersTranslation;
          seq.mattersScale = newMattersScale;
-         seq.baseObjectState += objectStateBaseShift;
-         seq.firstTrigger += triggerBase;
 
          if (fileVersion > 21)
          {
-            seq.firstGroundFrame += groundBase;
+            seq.baseRot += adjNodeRots;
+            seq.baseTrans += adjNodeTrans;
+            if (seq.testFlags(Sequence::UniformScale))
+               seq.baseScale += adjNodeScales1;
+            else if (seq.testFlags(Sequence::AlignedScale))
+               seq.baseScale += adjNodeScales2;
+            else if (seq.testFlags(Sequence::ArbitraryScale))
+               seq.baseScale += adjNodeScales3;
+         }
+         else if (fileVersion >= 17)
+         {
+            seq.baseRot += adjNodeRots;
+            seq.baseTrans += adjNodeTrans;
          }
 
-         importedSequenceMeta.push_back(meta);
+         seq.baseObjectState += adjObjectStates;
+         seq.firstTrigger += triggerBase;
+         seq.firstGroundFrame += groundBase;
          shape->mSequences.push_back(seq);
       }
 
       if (fileVersion < 22)
       {
-         const size_t importedSequenceStart = shape->mSequences.size() - importedSequenceMeta.size();
-         for (size_t i = 0; i < importedSequenceMeta.size(); ++i)
+         for (size_t seqIndex = importedSequenceStart; seqIndex < shape->mSequences.size(); ++seqIndex)
          {
-            Sequence& seq = shape->mSequences[importedSequenceStart + i];
-            const ImportedSequenceMeta& meta = importedSequenceMeta[i];
-
+            Sequence& seq = shape->mSequences[seqIndex];
             const int32_t oldGroundSize = (int32_t)shape->mGroundTranslations.size();
             if (seq.numGroundFrames > 0)
             {
@@ -846,16 +873,16 @@ struct IO
                shape->mGroundRotations.resize(shape->mGroundRotations.size() + seq.numGroundFrames);
                for (int32_t frame = 0; frame < seq.numGroundFrames; ++frame)
                {
-                  const int32_t sourceIndex = meta.originalFirstGroundFrame + frame;
+                  const int32_t sourceIndex = seq.firstGroundFrame + adjNodeTrans + frame;
                   if (sourceIndex < 0 ||
-                      sourceIndex >= (int32_t)imported.translations.size() ||
-                      sourceIndex >= (int32_t)imported.rotations.size())
+                      sourceIndex >= (int32_t)shape->mNodeTranslations.size() ||
+                      sourceIndex >= (int32_t)shape->mNodeRotations.size())
                   {
                      return false;
                   }
                   
-                  shape->mGroundTranslations[oldGroundSize + frame] = imported.translations[sourceIndex];
-                  shape->mGroundRotations[oldGroundSize + frame] = imported.rotations[sourceIndex];
+                  shape->mGroundTranslations[oldGroundSize + frame] = shape->mNodeTranslations[sourceIndex];
+                  shape->mGroundRotations[oldGroundSize + frame] = shape->mNodeRotations[sourceIndex];
                }
             }
             seq.firstGroundFrame = oldGroundSize;
