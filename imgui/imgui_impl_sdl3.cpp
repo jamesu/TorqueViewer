@@ -77,7 +77,7 @@
 #endif
 
 // SDL
-#include <SDL3/SDL.h>
+#include "../TorqueViewer/SDLCompat.h"
 #include <stdio.h>              // for snprintf()
 #if defined(__APPLE__)
 #include <TargetConditionals.h>

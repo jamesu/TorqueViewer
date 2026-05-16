@@ -21,7 +21,6 @@
 //-----------------------------------------------------------------------------
 
 #include <stdint.h>
-#include <SDL3/SDL.h>
 #include <stdio.h>
 #include <strings.h>
 #include <algorithm>
@@ -34,6 +33,11 @@
 #include <unordered_set>
 #include <numeric>
 
+#if defined(EMSCRIPTEN_BUILD)
+#include <emscripten/emscripten.h>
+#endif
+
+#include "SDLCompat.h"
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 
@@ -1265,7 +1269,7 @@ public:
       }
 
       mShape->mIflMaterialsInitialized = true;
-      fprintf(stderr, "ifl init: baseMaterials=%zu totalMaterials=%zu iflMaterials=%zu iflFrameTimes=%zu\n",
+      fprintf(stderr, "ifl init: baseMaterials=%u totalMaterials=%zu iflMaterials=%zu iflFrameTimes=%zu\n",
               baseMaterialCount, mShape->mMaterials.size(), mShape->mIflMaterials.size(), mShape->mIflFrameTimes.size());
       for (size_t i = 0; i < mShape->mIflMaterials.size(); ++i)
       {
@@ -3243,7 +3247,7 @@ public:
    
    void render()
    {
-      if (mCurrentDetail < 0 || mCurrentDetail >= mShape->mDetailLevels.size())
+      if (!mShape || mCurrentDetail < 0 || mCurrentDetail >= mShape->mDetailLevels.size())
          return;
 
       updateMVP();
@@ -3617,6 +3621,9 @@ public:
    
    void renderNodes(int32_t nodeIdx, slm::vec3 parentPos, int32_t highlightIdx)
    {
+      if (!mShape)
+         return;
+
       if (nodeIdx < 0)
       {
          for (int32_t i=0; i<mShape->mNodes.size(); i++)
@@ -4551,6 +4558,7 @@ struct MainState
    
    int boot();
    int loop();
+   bool browserFrame();
    
    int testBoot();
    int testLoop();
@@ -4594,12 +4602,16 @@ int main(int argc, const char * argv[])
    ConsolePersistObject::initStatics();
    ResManager::initStatics();
    
-   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
+   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
       printf("Couldn't initialize SDL: %s\n", SDL_GetError());
       return (1);
    }
    
-   window = SDL_CreateWindow("DTS Viewer", 1024, 700, SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_RESIZABLE);
+   uint32_t windowFlags = SDL_WINDOW_RESIZABLE;
+#if defined(__APPLE__) && !defined(EMSCRIPTEN_BUILD)
+   windowFlags |= SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#endif
+   window = SDL_CreateWindow("DTS Viewer", 1024, 700, windowFlags);
    if (window == NULL) {
       printf( "Window could not be created! SDL_Error: %s\n", SDL_GetError() );
       return (1);
@@ -4608,6 +4620,21 @@ int main(int argc, const char * argv[])
    // Init basic main
    gMainState.init(window, argc, argv);
    
+#if defined(EMSCRIPTEN_BUILD)
+   emscripten_set_main_loop_arg(
+      [](void* arg)
+      {
+         MainState* state = static_cast<MainState*>(arg);
+         if (!state->browserFrame())
+         {
+            emscripten_cancel_main_loop();
+         }
+      },
+      &gMainState,
+      0,
+      true);
+   return 0;
+#else
    int setupCode = GFXSetup(window, NULL);
    
    if (setupCode < 0)
@@ -4624,15 +4651,50 @@ int main(int argc, const char * argv[])
    int ret = gMainState.boot();
    if (ret != 0)
       return ret;
-   
+
    while (gMainState.loop() == 0)
    {
       ;
    }
-   
+
    gMainState.shutdown();
-   
+
    return 0;
+#endif
+}
+
+bool MainState::browserFrame()
+{
+#if defined(EMSCRIPTEN_BUILD)
+   if (!isGFXSetup)
+   {
+      int setupCode = GFXSetup(window, NULL);
+      if (setupCode < 0)
+      {
+         shutdown();
+         return false;
+      }
+      if (setupCode != 0)
+         return true;
+
+      isGFXSetup = true;
+      int bootCode = boot();
+      if (bootCode != 0)
+      {
+         shutdown();
+         return false;
+      }
+   }
+
+   if (loop() != 0)
+   {
+      shutdown();
+      return false;
+   }
+   return true;
+#else
+   return loop() == 0;
+#endif
 }
 
 void MainState::shutdown()
@@ -4748,7 +4810,12 @@ int MainState::boot()
       }
    }
    
-   if (!currentController->isResourceLoaded())
+#if defined(EMSCRIPTEN_BUILD)
+   const bool allowEmptyStartup = true;
+#else
+   const bool allowEmptyStartup = false;
+#endif
+   if (!currentController->isResourceLoaded() && !allowEmptyStartup)
    {
       fprintf(stderr, "please specify a starting shape or interior or terrain to load\n");
       return 1;
@@ -4932,10 +4999,24 @@ int MainState::loop()
       currentController->update(dt);
       
       ImGui::Begin("Browse");
-      ImGui::Columns(2);
-      ImGui::ListBox("##bvols", &selectedVolumeIdx, cVolumeList.data(), cVolumeList.size());
-      ImGui::NextColumn();
-      ImGui::ListBox("##bfiles", &selectedFileIdx, cFileList.data(), cFileList.size());
+      if (cVolumeList.empty() && cFileList.empty())
+      {
+         ImGui::TextUnformatted("No resources mounted yet.");
+      }
+      else
+      {
+         ImGui::Columns(2);
+         if (!cVolumeList.empty())
+            ImGui::ListBox("##bvols", &selectedVolumeIdx, cVolumeList.data(), cVolumeList.size());
+         else
+            ImGui::TextUnformatted("No volumes");
+         ImGui::NextColumn();
+         if (!cFileList.empty())
+            ImGui::ListBox("##bfiles", &selectedFileIdx, cFileList.data(), cFileList.size());
+         else
+            ImGui::TextUnformatted("No files");
+         ImGui::Columns(1);
+      }
       ImGui::End();
       
       GFXEndFrame();
@@ -4946,10 +5027,12 @@ int MainState::loop()
    }
    
    uint64_t endTicks = SDL_GetTicks();
+#if !defined(EMSCRIPTEN_BUILD)
    if (endTicks - lastTicks < tickMS)
    {
       SDL_Delay(tickMS - (endTicks - lastTicks));
    }
+#endif
    
    return running ? 0 : 1;
 }

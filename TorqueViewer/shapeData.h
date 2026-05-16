@@ -924,7 +924,7 @@ public:
    {
       BasicData* data = getBasicData();
       if (data == NULL)
-         return 0;
+         return;
       
       mNumFrames = n;
       mVertsPerFrame = (uint32_t)data->verts.size() / n;
@@ -937,7 +937,7 @@ public:
       mBounds.min = slm::vec3(FLT_MAX, FLT_MAX, FLT_MAX);
       BasicData* data = getBasicData();
       if (data == NULL)
-         return 0;
+         return;
       
       for (const auto& vertex : data->verts)
       {

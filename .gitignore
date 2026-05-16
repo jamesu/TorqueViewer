@@ -9,4 +9,7 @@
 *.exe
 *.out
 *.app
-build/*.h
+build/**
+build-emc/**
+build-osx/**
+

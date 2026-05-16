@@ -21,7 +21,6 @@
 //-----------------------------------------------------------------------------
 
 #include <stdint.h>
-#include <SDL3/SDL.h>
 #include <stdio.h>
 #include <strings.h>
 #include <algorithm>
@@ -32,6 +31,7 @@
 #include <unordered_map>
 #include <slm/slmath.h>
 
+#include "SDLCompat.h"
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_wgpu.h"
@@ -1034,8 +1034,8 @@ void GFXPollEvents()
 
 void GFXTeardown();
 
+#if defined(__APPLE__) && !defined(EMSCRIPTEN_BUILD)
 extern void GFXSetCocoaWindow(SDL_Window* window, WGPUSurfaceSourceMetalLayer* s);
-#if defined(__APPLE__)
 extern void GFXClearCocoaWindow();
 #endif
 
