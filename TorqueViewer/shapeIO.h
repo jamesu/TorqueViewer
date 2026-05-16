@@ -830,6 +830,8 @@ struct IO
       // Common mesh header and vertex/index payload.
       if (version < 18)
       {
+         int32_t a = 0;
+         int32_t b = 0;
          int32_t i32 = 0;
 
          if (!stream.read(mesh->mNumFrames) ||
@@ -870,10 +872,12 @@ struct IO
          payload.primitives.resize(sz);
          for (Primitive& prim : payload.primitives)
          {
-            if (!stream.read(prim.firstElement) ||
-                !stream.read(prim.numElements) ||
+            if (!stream.read(a) ||
+                !stream.read(b) ||
                 !stream.read(i32))
                return false;
+            prim.firstElement = (uint16_t)a;
+            prim.numElements = (uint16_t)b;
             prim.matIndex = (Primitive::Type)i32;
          }
 
@@ -886,16 +890,6 @@ struct IO
             if (!stream.read(idx))
                return false;
             payload.indices[i] = (uint16_t)idx;
-         }
-
-         uint32_t mergeCount = 0;
-         if (!stream.read(mergeCount))
-            return false;
-         for (uint32_t i = 0; i < mergeCount; ++i)
-         {
-            uint16_t dummy = 0;
-            if (!stream.read(dummy))
-               return false;
          }
 
          if (!stream.read(mesh->mVertsPerFrame) ||
@@ -987,17 +981,6 @@ struct IO
             payload.indices[i] = idx;
          }
 
-         if (!stream.read(sz))
-            return false;
-         for (uint32_t i = 0; i < sz; ++i)
-         {
-            // The old format stores merge indices separately, but they are not
-            // used by the viewer path. Consume them and keep the vector empty.
-            uint16_t discard = 0;
-            if (!stream.read(discard))
-               return false;
-         }
-
          if (!stream.read(mesh->mVertsPerFrame) ||
              !stream.read(mesh->mFlags))
             return false;
@@ -1048,13 +1031,18 @@ struct IO
          if (!stream.read(sz))
             return false;
          skinData->vindex.resize(sz);
-         skinData->bindex.resize(sz);
-         skinData->vweight.resize(sz);
          for (uint32_t i = 0; i < sz; ++i)
          {
-            if (!stream.read(skinData->vindex[i]) ||
-                !stream.read(skinData->bindex[i]) ||
-                !stream.read(skinData->vweight[i]))
+            if (!stream.read(skinData->vindex[i]))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         skinData->bindex.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(skinData->bindex[i]))
                return false;
          }
 
@@ -1064,6 +1052,15 @@ struct IO
          for (uint32_t i = 0; i < sz; ++i)
          {
             if (!stream.read(skinData->nodeIndex[i]))
+               return false;
+         }
+
+         if (!stream.read(sz))
+            return false;
+         skinData->vweight.resize(sz);
+         for (uint32_t i = 0; i < sz; ++i)
+         {
+            if (!stream.read(skinData->vweight[i]))
                return false;
          }
       }
@@ -1344,6 +1341,23 @@ struct IO
             return false;
       }
 
+      // Legacy unified shapes do not carry a separate default-node block like
+      // the modern split format. In practice the first numNodes entries are the
+      // bind/default pose the renderer expects, so seed them here when present.
+      if (shape->mDefaultRotations.empty() && shape->mDefaultTranslations.empty() &&
+          numNodes > 0 &&
+          shape->mNodeRotations.size() >= numNodes &&
+          shape->mNodeTranslations.size() >= numNodes)
+      {
+         shape->mDefaultRotations.resize(numNodes);
+         shape->mDefaultTranslations.resize(numNodes);
+         for (uint32_t i = 0; i < numNodes; ++i)
+         {
+            shape->mDefaultRotations[i] = shape->mNodeRotations[i];
+            shape->mDefaultTranslations[i] = shape->mNodeTranslations[i];
+         }
+      }
+
       if (!stream.read(numObjectStates))
          return false;
       shape->mObjectStates.resize(numObjectStates);
@@ -1458,7 +1472,10 @@ struct IO
       std::vector<int32_t> detailNumSkins(numDetails, 0);
       if (numSkins > 0 && numDetails > 0)
       {
-         if (!stream.read((uint32_t)detailFirstSkin.size(), detailFirstSkin.data()))
+         uint32_t ignoredCount = 0;
+         if (!stream.read(ignoredCount))
+            return false;
+         if (!stream.read32(detailFirstSkin.size(), detailFirstSkin.data()))
             return false;
 
          int32_t prev = (int32_t)numSkins;
@@ -1525,7 +1542,7 @@ struct IO
       shape->mPreviousMerge.clear();
       shape->mPreviousMerge.resize(shape->mObjects.size(), -1);
 
-      return stream.mPos == stream.mSize;
+      return true;
    }
 
    template<typename T> static bool readShape(Shape* shape, T& ds)
@@ -1870,7 +1887,6 @@ struct IO
          }
          
          ds.readCheck();
-         
          correctPreV32Skins(shape, detailFirstSkin, detailNumSkins, numMeshes, numSkins, numDetails);
       }
       
@@ -1917,6 +1933,12 @@ struct IO
       }
 
       const size_t oldNumObjects = objects.size();
+      uint32_t emptySkins = 0;
+      for (uint32_t i = 0; i < numSkins; ++i)
+      {
+         if (meshes[numMeshes + i].mType == Mesh::T_Null)
+            ++emptySkins;
+      }
 
       std::vector<Mesh> skinsCopy;
       skinsCopy.reserve(numSkins);
@@ -1943,7 +1965,7 @@ struct IO
          return true;
       };
 
-      while (skinsUsed < present)
+      while (skinsUsed < numSkins - emptySkins)
       {
          Object obj{};
          obj.name        = 0;   // no name
@@ -1953,6 +1975,7 @@ struct IO
 
          obj.firstMesh = int(numMeshes + skinsCopy.size());
          obj.numMeshes = 0;
+         bool tookRealSkin = false;
 
          for (uint32_t dl = 0; dl < numDetails; ++dl)
          {
@@ -1969,6 +1992,7 @@ struct IO
                   if (takeSkin((uint32_t)i))
                   {
                      found = true;
+                     tookRealSkin = true;
                      ++obj.numMeshes;
                      break;
                   }
@@ -1988,11 +2012,14 @@ struct IO
             skinsCopy.pop_back();
             --obj.numMeshes;
          }
-         // Only add object if we have meshes
          if (obj.numMeshes > 0)
          {
             objects.push_back(obj);
             ++numSkinObjects;
+         }
+         else
+         {
+            break;
          }
       }
 
