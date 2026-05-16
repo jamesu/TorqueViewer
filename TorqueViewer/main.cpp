@@ -3690,6 +3690,8 @@ public:
       mDebugRenderDecals = false;
       mDebugRenderNormals = false;
       mDisableLighting = false;
+      mViewer.mDirectionalLight = true;
+      mViewer.mLightFollowsCamera = true;
    }
    
    ~ShapeViewerController()
@@ -3747,6 +3749,8 @@ public:
       mDebugRenderDecals = false;
       mDebugRenderNormals = false;
       mDisableLighting = false;
+      mViewer.mDirectionalLight = true;
+      mViewer.mLightFollowsCamera = true;
       mViewer.clear();
       if (mShape)
          delete mShape;
