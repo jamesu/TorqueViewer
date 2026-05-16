@@ -1850,12 +1850,14 @@ void GFXEndFrame()
    ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), smState.renderEncoder);
    
    smState.endRenderPass();
-   
+
+#if !defined(EMSCRIPTEN_BUILD)
    WGPUStatus presentStatus = wgpuSurfacePresent(smState.gpuSurface);
    if (presentStatus != WGPUStatus_Success)
    {
       fprintf(stderr, "wgpuSurfacePresent failed: %d\n", (int)presentStatus);
    }
+#endif
    
    if (smState.gpuSurfaceTexture.texture)
    {
