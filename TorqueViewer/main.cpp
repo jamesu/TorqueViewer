@@ -5107,13 +5107,16 @@ int MainState::loop()
    uint64_t oldLastTicks = lastTicks;
    float dt = ((float)(curTicks - lastTicks)) / 1000.0f;
    lastTicks = curTicks;
+   SDL_PumpEvents();
+   const bool moveFast = SDL_GetKeyboardState(NULL)[SDL_SCANCODE_LSHIFT] || SDL_GetKeyboardState(NULL)[SDL_SCANCODE_RSHIFT];
    const bool captureKeyboard = ImGui::GetIO().WantCaptureKeyboard;
    if (!captureKeyboard)
    {
       currentController->mCamRot += deltaRot * dt * 100;
       slm::mat4 rotMat = slm::rotation_z(slm::radians(currentController->mCamRot.z)) * slm::rotation_y(slm::radians(currentController->mCamRot.y)) *  slm::rotation_x(slm::radians(currentController->mCamRot.x));
       slm::vec4 forwardVec = rotMat * slm::vec4(deltaMovement, 0);
-      currentController->mViewPos += forwardVec.xyz() * currentController->mViewSpeed * dt;
+      const float moveSpeed = currentController->mViewSpeed * (moveFast ? 5.0f : 1.0f);
+      currentController->mViewPos += forwardVec.xyz() * moveSpeed * dt;
    }
    
    int w, h;
