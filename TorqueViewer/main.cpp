@@ -4570,6 +4570,8 @@ public:
    
 };
 
+#include "interiorViewer.h"
+
 
 static const uint64_t tickMS = 1000.0 / 60;
 
@@ -4577,7 +4579,7 @@ struct MainState
 {
    ResManager resManager;
    ShapeViewerController* shapeController;
-   //InteriorViewerController* interiorController;
+   InteriorViewerController* interiorController;
    //TerrainViewerController* terrainController;
    ViewController *currentController;
    
@@ -4608,7 +4610,7 @@ struct MainState
    
    SDL_Window* window;
    
-   MainState() : shapeController(NULL), /* interiorController(NULL), terrainController(NULL),*/ currentController(NULL), in_argc(0), isGFXSetup(false)
+   MainState() : shapeController(NULL), interiorController(NULL), /* terrainController(NULL),*/ currentController(NULL), in_argc(0), isGFXSetup(false)
    {
       lastTicks = 0;
       selectedFileIdx = -1;
@@ -4726,6 +4728,10 @@ struct MainState
             shapeController->mViewer.reloadMaterials();
             shapeController->mViewer.refreshRenderStateAfterSequenceImport();
          }
+         if (textureImport && interiorController->isResourceLoaded())
+         {
+            interiorController->mViewer.reloadMaterials();
+         }
       }
 #endif
    }
@@ -4737,7 +4743,7 @@ struct MainState
       in_argv = argv;
       
       shapeController = new ShapeViewerController(window, &resManager);
-      //interiorController = new InteriorViewerController(window, &resManager);
+      interiorController = new InteriorViewerController(window, &resManager);
       //terrainController = new TerrainViewerController(window, &resManager);
    }
    
@@ -4900,12 +4906,14 @@ void MainState::shutdown()
    if (shapeController)
    {
       delete shapeController;
-      //delete interiorController;
-      //delete terrainController;
       shapeController = NULL;
-      //interiorController = NULL;
-      //terrainController = NULL;
    }
+   if (interiorController)
+   {
+      delete interiorController;
+      interiorController = NULL;
+   }
+   currentController = NULL;
    
    GFXTeardown();
    SDL_DestroyWindow( gMainState.window );
@@ -5020,8 +5028,8 @@ int MainState::boot()
       }
       else if (ext == ".dif")
       {
-         //interiorController->loadInterior(path);
-         //currentController = interiorController;
+         if (interiorController->loadInterior(path))
+            currentController = interiorController;
       }
       else if (ext == ".ter")
       {
@@ -5128,8 +5136,8 @@ int MainState::loop()
       
       if (ext == ".dif")
       {
-         //interiorController->loadInterior(cFileList[selectedFileIdx], selectedVolumeIdx);
-         //currentController = interiorController;
+         if (interiorController->loadInterior(cFileList[selectedFileIdx], selectedVolumeIdx))
+            currentController = interiorController;
       }
       else if (ext == ".ter")
       {

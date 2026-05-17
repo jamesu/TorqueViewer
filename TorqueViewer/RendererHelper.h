@@ -46,6 +46,7 @@ extern void GFXSetModelTransformTexture(int32_t texID);
 extern void GFXSetTSMaterialResources(uint32_t tsGroupID, int32_t diffuseTexID, int32_t emapAlphaTexID, int32_t emapTexID, int32_t dmapID);
 extern void GFXSetITRMaterialResources(uint32_t itrGroupID, int32_t baseTexID, int32_t emapTexID, int32_t lightmapTexID);
 extern void GFXBeginTSModelPipelineState(ModelPipelineState state, uint32_t tsGroupID, float testVal, bool depthPeel, bool swapDepth);
+extern void GFXBeginBasicModelPipelineState(ModelPipelineState state, uint32_t tsGroupID, float testVal, bool depthPeel, bool swapDepth);
 extern void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID, float testVal, bool depthPeel, bool swapDepth);
 extern void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT, uint32_t materialFlags = 0, bool debugDecal = false, bool debugNormals = false, bool disableLighting = false, slm::vec4 debugColor = slm::vec4(1, 1, 0, 1), float clipDepthBias = 0.0f);
 //

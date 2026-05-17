@@ -1,0 +1,3 @@
+[submodule "ext/dif"]
+	path = ext/dif
+	url = https://github.com/HiGuyMB/Dif.git

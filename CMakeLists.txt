@@ -21,6 +21,7 @@ endfunction()
 
 
 generate_escaped_string_header("TorqueViewer/lineShader.wgsl" "${CMAKE_BINARY_DIR}/lineShader.wgsl.h" "sLineShaderCode")
+generate_escaped_string_header("TorqueViewer/basicModelShader.wgsl" "${CMAKE_BINARY_DIR}/basicModelShader.wgsl.h" "sBasicModelShaderCode")
 generate_escaped_string_header("TorqueViewer/skinnedModelShader.wgsl" "${CMAKE_BINARY_DIR}/skinnedModelShader.wgsl.h" "sModelShaderCode")
 generate_escaped_string_header("TorqueViewer/terrainShader.wgsl" "${CMAKE_BINARY_DIR}/terrainShader.wgsl.h" "sTerrainShaderCode")
 
@@ -34,7 +35,9 @@ if(APPLE AND NOT EMSCRIPTEN)
 endif()
 
 # Specify the include directories
-include_directories(include imgui include/slm TorqueViewer "${CMAKE_BINARY_DIR}")
+include_directories(include imgui include/slm TorqueViewer "${CMAKE_BINARY_DIR}" ext/dif/include ext/dif/3rdparty/glm)
+
+add_subdirectory(ext/dif EXCLUDE_FROM_ALL)
 
 # Emscripten builds use the browser WebGPU/SDL stack and should boot without native wgpu-native.
 if (EMSCRIPTEN)
@@ -160,10 +163,10 @@ if (EMSCRIPTEN)
         "-gsource-map"
         "-g2"
     )
-    target_link_libraries(TorqueViewer ${SDL3_LIBS} ${TARGET_LIBS})
+    target_link_libraries(TorqueViewer ${SDL3_LIBS} ${TARGET_LIBS} Dif)
     set_target_properties(TorqueViewer PROPERTIES SUFFIX ".html")
 else()
-    target_link_libraries(TorqueViewer ${SDL3_LIBS} -lm -pthread ${TARGET_LIBS})
+    target_link_libraries(TorqueViewer ${SDL3_LIBS} -lm -pthread ${TARGET_LIBS} Dif)
 endif()
 target_compile_definitions(TorqueViewer PRIVATE ${TARGET_DEFINES})
 

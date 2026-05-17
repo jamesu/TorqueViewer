@@ -39,6 +39,7 @@
 #include "CommonShaderTypes.h"
 #include "CommonData.h"
 
+#include "basicModelShader.wgsl.h"
 #include "lineShader.wgsl.h"
 #include "skinnedModelShader.wgsl.h"
 #include "terrainShader.wgsl.h"
@@ -121,6 +122,23 @@ struct ModelProgramInfo : public BaseProgramInfo
    void reset()
    {
       for (int i=0; i<ModelPipeline_Count; i++)
+      {
+         if (pipelines[i])
+            wgpuRenderPipelineRelease(pipelines[i]);
+         pipelines[i] = NULL;
+      }
+   }
+};
+
+struct BasicModelProgramInfo : public BaseProgramInfo
+{
+   WGPURenderPipeline pipelines[ModelPipeline_Count];
+
+   BasicModelProgramInfo() { memset(pipelines, '\0', sizeof(pipelines)); }
+
+   void reset()
+   {
+      for (int i = 0; i < ModelPipeline_Count; i++)
       {
          if (pipelines[i])
             wgpuRenderPipelineRelease(pipelines[i]);
@@ -256,6 +274,7 @@ struct SDLState
    
    LineProgramInfo lineProgram;
    ModelProgramInfo modelProgram;
+   BasicModelProgramInfo basicModelProgram;
    TerrainProgramInfo terrainProgram;
    
    //
@@ -737,6 +756,143 @@ ModelProgramInfo buildModelProgram()
    return ret;
 }
 
+BasicModelProgramInfo buildBasicModelProgram()
+{
+   BasicModelProgramInfo ret;
+
+   WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
+   pipelineLayoutDesc.label = WGPUString("Basic Model Pipeline Layout");
+   pipelineLayoutDesc.bindGroupLayoutCount = 2;
+   WGPUBindGroupLayout bindGroupLayouts[2] = {smState.commonUniformLayout, smState.commonTextureLayout};
+   pipelineLayoutDesc.bindGroupLayouts = bindGroupLayouts;
+
+   WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(smState.gpuDevice, &pipelineLayoutDesc);
+
+   auto buildPipelineForState = [&pipelineLayout](ModelPipelineState state){
+      WGPUVertexAttribute vertexAttributes0[2];
+      vertexAttributes0[0] = {};
+      vertexAttributes0[0].format = WGPUVertexFormat_Float32x3;
+      vertexAttributes0[0].offset = offsetof(ModelVertex, position);
+      vertexAttributes0[0].shaderLocation = 0;
+
+      vertexAttributes0[1] = {};
+      vertexAttributes0[1].format = WGPUVertexFormat_Float32x3;
+      vertexAttributes0[1].offset = offsetof(ModelVertex, normal);
+      vertexAttributes0[1].shaderLocation = 1;
+
+      WGPUVertexBufferLayout vertexBufferLayout0 = {};
+      vertexBufferLayout0.arrayStride = sizeof(ModelVertex);
+      vertexBufferLayout0.stepMode = WGPUVertexStepMode_Vertex;
+      vertexBufferLayout0.attributeCount = 2;
+      vertexBufferLayout0.attributes = vertexAttributes0;
+
+      WGPUVertexAttribute vertexAttributes1[1];
+      vertexAttributes1[0] = {};
+      vertexAttributes1[0].format = WGPUVertexFormat_Float32x2;
+      vertexAttributes1[0].offset = offsetof(ModelTexVertex, texcoord);
+      vertexAttributes1[0].shaderLocation = 2;
+
+      WGPUVertexBufferLayout vertexBufferLayout1 = {};
+      vertexBufferLayout1.arrayStride = sizeof(ModelTexVertex);
+      vertexBufferLayout1.stepMode = WGPUVertexStepMode_Vertex;
+      vertexBufferLayout1.attributeCount = 1;
+      vertexBufferLayout1.attributes = vertexAttributes1;
+
+      WGPUVertexState vertexState = {};
+      vertexState.module = smState.shaders["basicModelShader"];
+      vertexState.entryPoint = WGPUString("mainVert");
+      vertexState.bufferCount = 2;
+      WGPUVertexBufferLayout vertexLayouts[2] = {vertexBufferLayout0, vertexBufferLayout1};
+      vertexState.buffers = vertexLayouts;
+
+      WGPUFragmentState fragmentState = {};
+      fragmentState.module = smState.shaders["basicModelShader"];
+      fragmentState.entryPoint = WGPUString("mainFrag");
+      fragmentState.targetCount = 1;
+
+      WGPUColorTargetState colorTargetState = {};
+      colorTargetState.format = WGPUTextureFormat_BGRA8Unorm;
+
+      WGPUBlendState blendState = {};
+      colorTargetState.blend = NULL;
+
+      switch (state)
+      {
+         case ModelPipeline_AdditiveBlend:
+            blendState.color.operation = WGPUBlendOperation_Add;
+            blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+            blendState.color.dstFactor = WGPUBlendFactor_One;
+            blendState.alpha.operation = WGPUBlendOperation_Add;
+            blendState.alpha.srcFactor = WGPUBlendFactor_One;
+            blendState.alpha.dstFactor = WGPUBlendFactor_One;
+            colorTargetState.blend = &blendState;
+            break;
+         case ModelPipeline_SubtractiveBlend:
+            blendState.color.operation = WGPUBlendOperation_ReverseSubtract;
+            blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+            blendState.color.dstFactor = WGPUBlendFactor_One;
+            blendState.alpha.operation = WGPUBlendOperation_Add;
+            blendState.alpha.srcFactor = WGPUBlendFactor_One;
+            blendState.alpha.dstFactor = WGPUBlendFactor_One;
+            colorTargetState.blend = &blendState;
+            break;
+         case ModelPipeline_TranslucentBlend:
+            blendState.color.operation = WGPUBlendOperation_Add;
+            blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
+            blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            blendState.alpha.operation = WGPUBlendOperation_Add;
+            blendState.alpha.srcFactor = WGPUBlendFactor_One;
+            blendState.alpha.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
+            colorTargetState.blend = &blendState;
+            break;
+
+         case ModelPipeline_DefaultDiffuse:
+         default:
+            break;
+      };
+
+      colorTargetState.writeMask = WGPUColorWriteMask_All;
+      fragmentState.targets = &colorTargetState;
+
+      WGPUPrimitiveState primitiveState = {};
+      primitiveState.topology = WGPUPrimitiveTopology_TriangleList;
+      primitiveState.stripIndexFormat = WGPUIndexFormat_Undefined;
+      primitiveState.frontFace = WGPUFrontFace_CW;
+      primitiveState.cullMode = WGPUCullMode_None;
+
+      WGPUMultisampleState multisampleState = {};
+      multisampleState.count = 1;
+      multisampleState.mask = ~0;
+      multisampleState.alphaToCoverageEnabled = WGPU_FALSE;
+
+      WGPUDepthStencilState depthStencilState = {};
+      depthStencilState.format = WGPUTextureFormat_Depth32Float;
+      depthStencilState.depthWriteEnabled = WGPUOptionalBoolFromBool(state == ModelPipeline_DefaultDiffuse);
+      depthStencilState.depthCompare = WGPUCompareFunction_Less;
+      depthStencilState.depthBias = 0;
+      depthStencilState.depthBiasSlopeScale = 0.0f;
+      depthStencilState.depthBiasClamp = 0.0f;
+
+      WGPURenderPipelineDescriptor pipelineDesc = {};
+      pipelineDesc.label = WGPUString("Basic Model Render Pipeline");
+      pipelineDesc.layout = pipelineLayout;
+      pipelineDesc.vertex = vertexState;
+      pipelineDesc.primitive = primitiveState;
+      pipelineDesc.fragment = &fragmentState;
+      pipelineDesc.depthStencil = &depthStencilState;
+      pipelineDesc.multisample = multisampleState;
+
+      return wgpuDeviceCreateRenderPipeline(smState.gpuDevice, &pipelineDesc);
+   };
+
+   for (int i = 0; i < ModelPipeline_Count; i++)
+   {
+      ret.pipelines[i] = buildPipelineForState((ModelPipelineState)i);
+   }
+
+   return ret;
+}
+
 int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
 {
    smState.window = window;
@@ -806,6 +962,8 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    
    if (!smState.loadShaderModule("lineShader", "lineShader.wgsl", sLineShaderCode))
       fprintf(stderr, "failed to load lineShader shader module\n");
+   if (!smState.loadShaderModule("basicModelShader", "basicModelShader.wgsl", sBasicModelShaderCode))
+      fprintf(stderr, "failed to load basicModelShader shader module\n");
    if (!smState.loadShaderModule("modelShader", "skinnedModelShader.wgsl", sModelShaderCode))
       fprintf(stderr, "failed to load modelShader shader module\n");
    if (!smState.loadShaderModule("terrainShader", "terrainShader.wgsl", sTerrainShaderCode))
@@ -961,6 +1119,7 @@ int GFXSetup(SDL_Window* window, SDL_Renderer* renderer)
    smState.terrainTextureLayout = wgpuDeviceCreateBindGroupLayout(smState.gpuDevice, &bindGroupLayoutDescTER);
 
    smState.modelProgram = buildModelProgram();
+   smState.basicModelProgram = buildBasicModelProgram();
    smState.lineProgram = buildLineProgram();
    smState.terrainProgram = buildTerrainProgram();
    
@@ -1279,6 +1438,7 @@ void SDLState::resetWGPUState()
    
    lineProgram.reset();
    modelProgram.reset();
+   basicModelProgram.reset();
    
    if (commonUniformLayout)
       wgpuBindGroupLayoutRelease(commonUniformLayout);
@@ -2538,6 +2698,29 @@ void GFXBeginTSModelPipelineState(ModelPipelineState state, uint32_t tsGroupID, 
       wgpuRenderPassEncoderSetBindGroup(smState.renderEncoder, 2, smState.currentModelTransformGroup, 0, NULL);
 }
 
+void GFXBeginBasicModelPipelineState(ModelPipelineState state, uint32_t tsGroupID, float testVal, bool depthPeel, bool swapDepth)
+{
+   smState.currentPipeline = smState.basicModelProgram.pipelines[state];
+   smState.currentProgram = &smState.basicModelProgram;
+   smState.currentModelTransformTexID = -1;
+   smState.currentModelTransformGroup = NULL;
+   wgpuRenderPassEncoderSetPipeline(smState.renderEncoder, smState.currentPipeline);
+
+   GFXSetLightPos(smState.lightPos, smState.lightColor, smState.lightDirectional);
+   GFXSetModelViewProjection(smState.modelMatrix, smState.viewMatrix, smState.projectionMatrix);
+
+   if (state == ModelPipeline_DefaultDiffuse)
+   {
+      smState.basicModelProgram.uniforms.params2.x = testVal;
+   }
+   else
+   {
+      smState.basicModelProgram.uniforms.params2.x = 1.1f;
+   }
+
+   GFXSetTSMaterialResources(tsGroupID, -1, -1, -1, -1);
+}
+
 void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID, float testVal, bool depthPeel, bool swapDepth)
 {
    smState.currentPipeline = smState.modelProgram.pipelines[state];
@@ -2563,25 +2746,26 @@ void GFXBeginITRModelPipelineState(ModelPipelineState state, uint32_t itrGroupID
 
 void GFXSetTSPipelineProps(uint32_t matFrame, uint32_t transformOffset, slm::vec4 texGenS, slm::vec4 texGenT, uint32_t materialFlags, bool debugDecal, bool debugNormals, bool disableLighting, slm::vec4 debugColor, float clipDepthBias)
 {
-   smState.modelProgram.uniforms.params1.x = (float)transformOffset;
-   smState.modelProgram.uniforms.params1.y = 1.0f;
-   smState.modelProgram.uniforms.params1.z = 1.0f;
-   smState.modelProgram.uniforms.params1.w = (float)matFrame;
-   smState.modelProgram.uniforms.params3.x = (materialFlags & MaterialList::SelfIlluminating) ? 1.0f : 0.0f;
-   smState.modelProgram.uniforms.params3.y = disableLighting ? 1.0f : 0.0f;
-   smState.modelProgram.uniforms.params2.y =
+   CommonUniformStruct& uniforms = smState.currentProgram->uniforms;
+   uniforms.params1.x = (float)transformOffset;
+   uniforms.params1.y = 1.0f;
+   uniforms.params1.z = 1.0f;
+   uniforms.params1.w = (float)matFrame;
+   uniforms.params3.x = (materialFlags & MaterialList::SelfIlluminating) ? 1.0f : 0.0f;
+   uniforms.params3.y = disableLighting ? 1.0f : 0.0f;
+   uniforms.params2.y =
       (slm::length(texGenS) > 0.0f || slm::length(texGenT) > 0.0f) ? 1.0f : 0.0f;
-   smState.modelProgram.uniforms.params2.z = debugNormals ? 2.0f : (debugDecal ? 1.0f : 0.0f);
-   smState.modelProgram.uniforms.params2.w = clipDepthBias;
-   smState.modelProgram.uniforms.squareTexCoords[0] = texGenS;
-   smState.modelProgram.uniforms.squareTexCoords[1] = texGenT;
-   smState.modelProgram.uniforms.squareTexCoords[2] = debugColor;
+   uniforms.params2.z = debugNormals ? 2.0f : (debugDecal ? 1.0f : 0.0f);
+   uniforms.params2.w = clipDepthBias;
+   uniforms.squareTexCoords[0] = texGenS;
+   uniforms.squareTexCoords[1] = texGenT;
+   uniforms.squareTexCoords[2] = debugColor;
    
    if (smState.currentModelTransformTexID >= 0 && smState.currentModelTransformTexID < smState.textures.size())
    {
       SDLState::TexInfo& transformTex = smState.textures[smState.currentModelTransformTexID];
-      smState.modelProgram.uniforms.params1.y = (float)transformTex.dims[0];
-      smState.modelProgram.uniforms.params1.z = (float)transformTex.dims[1];
+      uniforms.params1.y = (float)transformTex.dims[0];
+      uniforms.params1.z = (float)transformTex.dims[1];
    }
 }
 
@@ -2625,7 +2809,10 @@ void GFXSetModelVerts(uint32_t modelId, uint32_t vertOffset, uint32_t texOffset,
        
    wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 0, model.vertOffset.buffer, model.vertOffset.offset + (vertOffset * sizeof(ModelVertex)), vertSize - (vertOffset * sizeof(ModelVertex)));
    wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 1, model.texVertOffset.buffer, model.texVertOffset.offset + (texOffset * sizeof(ModelTexVertex)), texVertSize - (texOffset * sizeof(ModelTexVertex)));
-   wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 2, model.skinOffset.buffer, model.skinOffset.offset + (skinOffset * sizeof(ModelSkinVertex)), skinSize - (skinOffset * sizeof(ModelSkinVertex)));
+   if (model.numSkinVerts > 0 && model.skinData != NULL)
+   {
+      wgpuRenderPassEncoderSetVertexBuffer(smState.renderEncoder, 2, model.skinOffset.buffer, model.skinOffset.offset + (skinOffset * sizeof(ModelSkinVertex)), skinSize - (skinOffset * sizeof(ModelSkinVertex)));
+   }
 }
 
 void GFXDrawModelVerts(uint32_t numVerts, uint32_t startVerts)
