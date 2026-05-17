@@ -7,6 +7,7 @@ struct CommonUniforms {
     params3: vec4<f32>, // material flags / debug toggles
     lightPos: vec4<f32>,
     lightColor: vec4<f32>,
+    squareTexCoords: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0) var<uniform> commonUniforms: CommonUniforms;
@@ -81,6 +82,12 @@ fn mainFrag(input: VertexOutput) -> FragmentOutput {
     if (commonUniforms.params2.z > 1.5) {
         var debugOut: FragmentOutput;
         debugOut.Color = vec4<f32>(normalize(input.vWorldNormal) * 0.5 + vec3<f32>(0.5), 1.0);
+        return debugOut;
+    }
+
+    if (commonUniforms.params2.z > 0.5) {
+        var debugOut: FragmentOutput;
+        debugOut.Color = commonUniforms.squareTexCoords[2];
         return debugOut;
     }
 

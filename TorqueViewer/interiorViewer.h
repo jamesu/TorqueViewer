@@ -36,19 +36,37 @@ public:
       InteriorPart() : materialIndex(0), firstIndex(0), indexCount(0) {;}
    };
 
+   struct MaterialBatch
+   {
+      uint32_t materialIndex;
+      uint32_t firstIndex;
+      uint32_t indexCount;
+      uint32_t materialFlags;
+      uint32_t textureGroupID;
+      ModelPipelineState pipelineState;
+
+      MaterialBatch()
+         : materialIndex(0), firstIndex(0), indexCount(0), materialFlags(0), textureGroupID(0), pipelineState(ModelPipeline_DefaultDiffuse)
+      {;}
+   };
+
    struct RenderableBlock
    {
       std::string label;
       DIF::Interior* interior;
       MaterialList materials;
       std::vector<GenericViewer::ActiveMaterial> activeMaterials;
-      std::vector<InteriorPart> parts;
+      std::vector<MaterialBatch> materialBatches;
+      std::vector<InteriorPart> portalParts;
       ShapeViewer::PackedModelData packed;
+      ShapeViewer::PackedModelData portalPacked;
       uint32_t modelId;
+      uint32_t portalModelId;
       bool enabled;
       bool geometryReady;
+      bool portalGeometryReady;
 
-      RenderableBlock() : interior(NULL), modelId(0), enabled(true), geometryReady(false) {;}
+      RenderableBlock() : interior(NULL), modelId(0), portalModelId(0), enabled(true), geometryReady(false), portalGeometryReady(false) {;}
    };
 
    DIF::DIF mDIF;
@@ -59,6 +77,7 @@ public:
    bool mGeometryReady;
    bool mDebugRenderNormals;
    bool mDisableLighting;
+   bool mShowPortals;
    std::vector<RenderableBlock> mBlocks;
    int mSelectedBlockIdx;
    int mSelectedMaterialIdx;
@@ -77,6 +96,7 @@ public:
       mScaleLightByShapeRadius = true;
       mDebugRenderNormals = false;
       mDisableLighting = false;
+      mShowPortals = false;
       mSelectedBlockIdx = -1;
       mSelectedMaterialIdx = 0;
    }
@@ -92,6 +112,8 @@ public:
       {
          if (block.geometryReady)
             GFXClearModelData(block.modelId);
+         if (block.portalGeometryReady)
+            GFXClearModelData(block.portalModelId);
       }
       GFXClearModelData(0);
       mBlocks.clear();
@@ -159,9 +181,30 @@ public:
       return ModelPipeline_DefaultDiffuse;
    }
 
+   void refreshMaterialBatchState(RenderableBlock& block)
+   {
+      for (MaterialBatch& batch : block.materialBatches)
+      {
+         if (batch.materialIndex >= block.materials.mMaterials.size())
+         {
+            batch.materialFlags = 0;
+            batch.textureGroupID = 0;
+            batch.pipelineState = ModelPipeline_DefaultDiffuse;
+            continue;
+         }
+
+         const MaterialList::Material& mat = block.materials.mMaterials[batch.materialIndex];
+         batch.materialFlags = mat.tsProps.flags;
+         batch.textureGroupID = batch.materialIndex < block.activeMaterials.size()
+            ? block.activeMaterials[batch.materialIndex].texGroupID
+            : 0;
+         batch.pipelineState = calcPipelineState(batch.materialFlags);
+      }
+   }
+
    void buildPackedGeometry(RenderableBlock& block)
    {
-      block.parts.clear();
+      block.materialBatches.clear();
       block.packed.verts.clear();
       block.packed.texVerts.clear();
       block.packed.indices.clear();
@@ -172,6 +215,13 @@ public:
       const size_t materialCount = block.materials.mMaterials.size();
       if (materialCount == 0)
          return;
+
+      struct MaterialBucket
+      {
+         ShapeViewer::PackedModelData packed;
+      };
+
+      std::vector<MaterialBucket> buckets(materialCount);
 
       for (size_t surfIdx = 0; surfIdx < block.interior->surface.size(); ++surfIdx)
       {
@@ -195,8 +245,8 @@ public:
             normal *= -1.0f;
 
          const DIF::Interior::TexGenEq& texGenEq = block.interior->texGenEq[surface.texGenIndex];
-         const uint32_t firstIndex = (uint32_t)block.packed.indices.size();
-         const uint32_t firstVertex = (uint32_t)block.packed.verts.size();
+         ShapeViewer::PackedModelData& bucket = buckets[surface.textureIndex].packed;
+         const uint32_t firstVertex = (uint32_t)bucket.verts.size();
          uint32_t triangleCount = 0;
 
          for (uint32_t j = surface.windingStart + 2; j < surface.windingStart + surface.windingCount; ++j)
@@ -223,38 +273,60 @@ public:
             const slm::vec2 uv1(interiorPlaneDistance(texGenEq.planeX, slm::vec3(p1.x, p1.y, p1.z)), interiorPlaneDistance(texGenEq.planeY, slm::vec3(p1.x, p1.y, p1.z)));
             const slm::vec2 uv2(interiorPlaneDistance(texGenEq.planeX, slm::vec3(p2.x, p2.y, p2.z)), interiorPlaneDistance(texGenEq.planeY, slm::vec3(p2.x, p2.y, p2.z)));
 
-            if (block.packed.verts.size() + 3 >= 65535)
+            if (bucket.verts.size() + 3 >= 65535)
                break;
 
-            block.packed.verts.push_back({v0, normal});
-            block.packed.verts.push_back({v1, normal});
-            block.packed.verts.push_back({v2, normal});
+            bucket.verts.push_back({v0, normal});
+            bucket.verts.push_back({v1, normal});
+            bucket.verts.push_back({v2, normal});
 
-            block.packed.texVerts.push_back({uv0});
-            block.packed.texVerts.push_back({uv1});
-            block.packed.texVerts.push_back({uv2});
+            bucket.texVerts.push_back({uv0});
+            bucket.texVerts.push_back({uv1});
+            bucket.texVerts.push_back({uv2});
 
-            block.packed.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 0));
-            block.packed.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 1));
-            block.packed.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 2));
+            bucket.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 0));
+            bucket.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 1));
+            bucket.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 2));
             triangleCount++;
          }
 
-         if (triangleCount > 0)
-         {
-            InteriorPart part;
-            part.materialIndex = (uint32_t)surface.textureIndex;
-            part.firstIndex = firstIndex;
-            part.indexCount = triangleCount * 3;
-            block.parts.push_back(part);
-         }
+      }
+
+      block.packed.verts.reserve(65535);
+      block.packed.texVerts.reserve(65535);
+      block.packed.indices.reserve(65535);
+
+      block.materialBatches.clear();
+      for (uint32_t matIndex = 0; matIndex < (uint32_t)materialCount; ++matIndex)
+      {
+         ShapeViewer::PackedModelData& bucket = buckets[matIndex].packed;
+         if (bucket.indices.empty())
+            continue;
+
+         const uint32_t firstVertex = (uint32_t)block.packed.verts.size();
+         const uint32_t firstIndex = (uint32_t)block.packed.indices.size();
+
+         for (const auto& vert : bucket.verts)
+            block.packed.verts.push_back(vert);
+         for (const auto& texVert : bucket.texVerts)
+            block.packed.texVerts.push_back(texVert);
+         for (uint16_t idx : bucket.indices)
+            block.packed.indices.push_back((uint16_t)(idx + firstVertex));
+
+         MaterialBatch batch;
+         batch.materialIndex = matIndex;
+         batch.firstIndex = firstIndex;
+         batch.indexCount = (uint32_t)bucket.indices.size();
+         block.materialBatches.push_back(batch);
       }
    }
 
    bool buildRenderableBlock(RenderableBlock& block, uint32_t modelId)
    {
       block.modelId = modelId;
+      block.portalModelId = modelId + 10000u;
       block.geometryReady = false;
+      block.portalGeometryReady = false;
 
       if (!block.interior)
          return false;
@@ -270,10 +342,73 @@ public:
       block.activeMaterials = mActiveMaterials;
 
       buildPackedGeometry(block);
+      refreshMaterialBatchState(block);
       if (block.packed.verts.empty() || block.packed.indices.empty())
       {
          GFXClearModelData(modelId);
          return false;
+      }
+
+      block.portalParts.clear();
+      block.portalPacked.verts.clear();
+      block.portalPacked.texVerts.clear();
+      block.portalPacked.indices.clear();
+      if (!block.interior->portal.empty())
+      {
+         const float sphereRadius = std::max(block.interior->boundingSphere.radius, 1.0f);
+         const float halfSize = std::max(sphereRadius * 0.15f, 0.5f);
+         const float depth = halfSize * 0.05f;
+
+         for (size_t portalIdx = 0; portalIdx < block.interior->portal.size(); ++portalIdx)
+         {
+            const DIF::Interior::Portal& portal = block.interior->portal[portalIdx];
+            if (portal.planeIndex >= block.interior->plane.size())
+               continue;
+
+            const DIF::Interior::Plane& plane = block.interior->plane[portal.planeIndex];
+            slm::vec3 normal = interiorSwizzle(block.interior->normal[plane.normalIndex]);
+            normal = GenericViewer::normalizeOrDefault(normal, slm::vec3(0.0f, 0.0f, 1.0f));
+            const slm::vec3 planePoint = normal * (-plane.planeDistance);
+
+            slm::vec3 tangent = std::abs(normal.z) < 0.9f ? slm::cross(slm::vec3(0.0f, 0.0f, 1.0f), normal)
+                                                         : slm::cross(slm::vec3(0.0f, 1.0f, 0.0f), normal);
+            tangent = GenericViewer::normalizeOrDefault(tangent, slm::vec3(1.0f, 0.0f, 0.0f));
+            slm::vec3 bitangent = GenericViewer::normalizeOrDefault(slm::cross(normal, tangent), slm::vec3(0.0f, 1.0f, 0.0f));
+
+            const slm::vec3 offset = normal * depth;
+            const slm::vec3 p0 = planePoint + (tangent * -halfSize) + (bitangent * -halfSize) + offset;
+            const slm::vec3 p1 = planePoint + (tangent *  halfSize) + (bitangent * -halfSize) + offset;
+            const slm::vec3 p2 = planePoint + (tangent *  halfSize) + (bitangent *  halfSize) + offset;
+            const slm::vec3 p3 = planePoint + (tangent * -halfSize) + (bitangent *  halfSize) + offset;
+
+            const uint32_t firstVertex = (uint32_t)block.portalPacked.verts.size();
+            if (firstVertex + 4 >= 65535)
+               break;
+
+            block.portalPacked.verts.push_back({p0, normal});
+            block.portalPacked.verts.push_back({p1, normal});
+            block.portalPacked.verts.push_back({p2, normal});
+            block.portalPacked.verts.push_back({p3, normal});
+
+            block.portalPacked.texVerts.push_back({slm::vec2(0.0f, 0.0f)});
+            block.portalPacked.texVerts.push_back({slm::vec2(1.0f, 0.0f)});
+            block.portalPacked.texVerts.push_back({slm::vec2(1.0f, 1.0f)});
+            block.portalPacked.texVerts.push_back({slm::vec2(0.0f, 1.0f)});
+
+            const uint32_t firstIndex = (uint32_t)block.portalPacked.indices.size();
+            block.portalPacked.indices.push_back((uint16_t)(firstVertex + 0));
+            block.portalPacked.indices.push_back((uint16_t)(firstVertex + 1));
+            block.portalPacked.indices.push_back((uint16_t)(firstVertex + 2));
+            block.portalPacked.indices.push_back((uint16_t)(firstVertex + 0));
+            block.portalPacked.indices.push_back((uint16_t)(firstVertex + 2));
+            block.portalPacked.indices.push_back((uint16_t)(firstVertex + 3));
+
+            InteriorPart portalPart;
+            portalPart.materialIndex = 0;
+            portalPart.firstIndex = firstIndex;
+            portalPart.indexCount = 6;
+            block.portalParts.push_back(portalPart);
+         }
       }
 
       GFXLoadModelData(modelId,
@@ -287,6 +422,21 @@ public:
                        0);
 
       block.geometryReady = true;
+
+      if (!block.portalPacked.verts.empty() && !block.portalPacked.indices.empty())
+      {
+         GFXLoadModelData(block.portalModelId,
+                          &block.portalPacked.verts[0],
+                          &block.portalPacked.texVerts[0],
+                          &block.portalPacked.indices[0],
+                          NULL,
+                          (uint32_t)block.portalPacked.verts.size(),
+                          (uint32_t)block.portalPacked.texVerts.size(),
+                          (uint32_t)block.portalPacked.indices.size(),
+                          0);
+         block.portalGeometryReady = true;
+      }
+
       return true;
    }
 
@@ -344,7 +494,7 @@ public:
       bool anyRenderable = false;
       for (const RenderableBlock& block : mBlocks)
       {
-         if (block.geometryReady && !block.parts.empty())
+         if (block.geometryReady && !block.materialBatches.empty())
          {
             anyRenderable = true;
             break;
@@ -359,7 +509,7 @@ public:
       }
 
       mSelectedBlockIdx = 0;
-      while (mSelectedBlockIdx < (int)mBlocks.size() && (!mBlocks[mSelectedBlockIdx].geometryReady || mBlocks[mSelectedBlockIdx].parts.empty()))
+      while (mSelectedBlockIdx < (int)mBlocks.size() && (!mBlocks[mSelectedBlockIdx].geometryReady || mBlocks[mSelectedBlockIdx].materialBatches.empty()))
          ++mSelectedBlockIdx;
       if (mSelectedBlockIdx >= (int)mBlocks.size())
          mSelectedBlockIdx = 0;
@@ -381,36 +531,62 @@ public:
       updateMVP();
       for (const RenderableBlock& block : mBlocks)
       {
-         if (!block.enabled || !block.geometryReady || block.parts.empty())
+         if (!block.enabled || !block.geometryReady || block.materialBatches.empty())
             continue;
 
          GFXSetModelVerts(block.modelId, 0, 0, 0, 0);
 
-         for (const InteriorPart& part : block.parts)
+         uint32_t lastMaterialFlags = UINT32_MAX;
+         uint32_t lastTextureGroupID = UINT32_MAX;
+         ModelPipelineState lastPipelineState = (ModelPipelineState)UINT32_MAX;
+
+         for (const MaterialBatch& batch : block.materialBatches)
          {
-            if (part.materialIndex >= block.materials.mMaterials.size())
+            if (batch.materialIndex >= block.materials.mMaterials.size())
                continue;
 
-            const MaterialList::Material& mat = block.materials.mMaterials[part.materialIndex];
-            const uint32_t materialFlags = mat.tsProps.flags;
-            const uint32_t textureGroupID = part.materialIndex < block.activeMaterials.size()
-               ? block.activeMaterials[part.materialIndex].texGroupID
-               : 0;
-            const ModelPipelineState pipelineState = calcPipelineState(materialFlags);
+            const bool stateChanged =
+               batch.pipelineState != lastPipelineState ||
+               batch.textureGroupID != lastTextureGroupID ||
+               batch.materialFlags != lastMaterialFlags;
 
-            GFXBeginBasicModelPipelineState(pipelineState, textureGroupID, 1.1f, false, false);
+            if (stateChanged)
+            {
+               GFXBeginBasicModelPipelineState(batch.pipelineState, batch.textureGroupID, 1.1f, false, false);
+               GFXSetTSPipelineProps(0,
+                                     0,
+                                     slm::vec4(0.0f),
+                                     slm::vec4(0.0f),
+                                     batch.materialFlags,
+                                     false,
+                                     mDebugRenderNormals,
+                                     mDisableLighting,
+                                     slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
+                                     1.0e-4f);
+               lastPipelineState = batch.pipelineState;
+               lastTextureGroupID = batch.textureGroupID;
+               lastMaterialFlags = batch.materialFlags;
+            }
+
+            GFXDrawModelPrims((uint32_t)block.packed.verts.size(), batch.indexCount, batch.firstIndex, 0);
+         }
+
+         if (mShowPortals && block.portalGeometryReady && !block.portalParts.empty())
+         {
+            GFXSetModelVerts(block.portalModelId, 0, 0, 0, 0);
+            GFXBeginBasicModelPipelineState(ModelPipeline_TranslucentBlend, 0, 1.1f, false, false);
             GFXSetTSPipelineProps(0,
                                   0,
                                   slm::vec4(0.0f),
                                   slm::vec4(0.0f),
-                                  materialFlags,
+                                  MaterialList::Translucent,
+                                  true,
                                   false,
-                                  mDebugRenderNormals,
-                                  mDisableLighting,
-                                  slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
+                                  true,
+                                  slm::vec4(1.0f, 0.9f, 0.1f, 0.35f),
                                   1.0e-4f);
-
-            GFXDrawModelPrims((uint32_t)block.packed.verts.size(), part.indexCount, part.firstIndex, 0);
+            for (const InteriorPart& part : block.portalParts)
+               GFXDrawModelPrims((uint32_t)block.portalPacked.verts.size(), part.indexCount, part.firstIndex, 0);
          }
       }
    }
@@ -423,6 +599,7 @@ public:
          mMaterialList = &block.materials;
          initMaterials();
          block.activeMaterials = mActiveMaterials;
+         refreshMaterialBatchState(block);
       }
       syncSelectedBlockMaterialState();
    }
@@ -571,6 +748,7 @@ public:
       }
       ImGui::Checkbox("Debug Normals", &mViewer.mDebugRenderNormals);
       ImGui::Checkbox("Disable Lighting", &mViewer.mDisableLighting);
+      ImGui::Checkbox("Show Portals", &mViewer.mShowPortals);
       if (ImGui::Button("Reset Light"))
       {
          mViewer.mLightPos = slm::vec3(0.0f, -2.0f, 2.0f);
