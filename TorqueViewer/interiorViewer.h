@@ -36,6 +36,21 @@ public:
       InteriorPart() : materialIndex(0), firstIndex(0), indexCount(0) {;}
    };
 
+   struct RenderableBlock
+   {
+      std::string label;
+      DIF::Interior* interior;
+      MaterialList materials;
+      std::vector<GenericViewer::ActiveMaterial> activeMaterials;
+      std::vector<InteriorPart> parts;
+      ShapeViewer::PackedModelData packed;
+      uint32_t modelId;
+      bool enabled;
+      bool geometryReady;
+
+      RenderableBlock() : interior(NULL), modelId(0), enabled(true), geometryReady(false) {;}
+   };
+
    DIF::DIF mDIF;
    DIF::Interior* mInterior;
    MaterialList mInteriorMaterials;
@@ -44,6 +59,9 @@ public:
    bool mGeometryReady;
    bool mDebugRenderNormals;
    bool mDisableLighting;
+   std::vector<RenderableBlock> mBlocks;
+   int mSelectedBlockIdx;
+   int mSelectedMaterialIdx;
 
    InteriorViewer(ResManager* res)
       : mInterior(NULL), mGeometryReady(false)
@@ -59,6 +77,8 @@ public:
       mScaleLightByShapeRadius = true;
       mDebugRenderNormals = false;
       mDisableLighting = false;
+      mSelectedBlockIdx = -1;
+      mSelectedMaterialIdx = 0;
    }
 
    ~InteriorViewer()
@@ -68,7 +88,13 @@ public:
 
    void clear()
    {
+      for (RenderableBlock& block : mBlocks)
+      {
+         if (block.geometryReady)
+            GFXClearModelData(block.modelId);
+      }
       GFXClearModelData(0);
+      mBlocks.clear();
       mParts.clear();
       mPacked.verts.clear();
       mPacked.texVerts.clear();
@@ -79,11 +105,47 @@ public:
       mDIF = DIF::DIF();
       mInteriorMaterials.free();
       mMaterialList = &mInteriorMaterials;
+      mActiveMaterials.clear();
       mResourceFilename.clear();
       mResourceMount = -1;
+      mSelectedBlockIdx = -1;
+      mSelectedMaterialIdx = 0;
       clearTextures();
       mAppliedLightPos = slm::vec3(0.0f, -2.0f, 2.0f);
       mAppliedLightRange = 0.0f;
+   }
+
+   RenderableBlock* getSelectedBlock()
+   {
+      if (mSelectedBlockIdx < 0 || mSelectedBlockIdx >= (int)mBlocks.size())
+         return NULL;
+      return &mBlocks[mSelectedBlockIdx];
+   }
+
+   const RenderableBlock* getSelectedBlock() const
+   {
+      if (mSelectedBlockIdx < 0 || mSelectedBlockIdx >= (int)mBlocks.size())
+         return NULL;
+      return &mBlocks[mSelectedBlockIdx];
+   }
+
+   void syncSelectedBlockMaterialState()
+   {
+      RenderableBlock* block = getSelectedBlock();
+      if (!block)
+      {
+         mMaterialList = &mInteriorMaterials;
+         mActiveMaterials.clear();
+         mSelectedMaterialIdx = 0;
+         return;
+      }
+
+      mMaterialList = &block->materials;
+      mActiveMaterials = block->activeMaterials;
+      if (mMaterialList->mMaterials.empty())
+         mSelectedMaterialIdx = 0;
+      else
+         mSelectedMaterialIdx = std::clamp(mSelectedMaterialIdx, 0, (int)mMaterialList->mMaterials.size() - 1);
    }
 
    static ModelPipelineState calcPipelineState(uint32_t flags)
@@ -97,61 +159,61 @@ public:
       return ModelPipeline_DefaultDiffuse;
    }
 
-   void buildPackedGeometry()
+   void buildPackedGeometry(RenderableBlock& block)
    {
-      mParts.clear();
-      mPacked.verts.clear();
-      mPacked.texVerts.clear();
-      mPacked.indices.clear();
+      block.parts.clear();
+      block.packed.verts.clear();
+      block.packed.texVerts.clear();
+      block.packed.indices.clear();
 
-      if (!mInterior)
+      if (!block.interior)
          return;
 
-      const size_t materialCount = mInteriorMaterials.mMaterials.size();
+      const size_t materialCount = block.materials.mMaterials.size();
       if (materialCount == 0)
          return;
 
-      for (size_t surfIdx = 0; surfIdx < mInterior->surface.size(); ++surfIdx)
+      for (size_t surfIdx = 0; surfIdx < block.interior->surface.size(); ++surfIdx)
       {
-         const DIF::Interior::Surface& surface = mInterior->surface[surfIdx];
+         const DIF::Interior::Surface& surface = block.interior->surface[surfIdx];
          if (surface.textureIndex >= materialCount)
             continue;
-         if (surface.planeIndex >= mInterior->plane.size() ||
-             surface.texGenIndex >= mInterior->texGenEq.size())
+         if (surface.planeIndex >= block.interior->plane.size() ||
+             surface.texGenIndex >= block.interior->texGenEq.size())
             continue;
          if (surface.windingCount < 3)
             continue;
-         if (surface.windingStart + surface.windingCount > mInterior->index.size())
+         if (surface.windingStart + surface.windingCount > block.interior->index.size())
             continue;
 
-         const DIF::Interior::Plane& plane = mInterior->plane[surface.planeIndex];
-         if (plane.normalIndex >= mInterior->normal.size())
+         const DIF::Interior::Plane& plane = block.interior->plane[surface.planeIndex];
+         if (plane.normalIndex >= block.interior->normal.size())
             continue;
 
-         slm::vec3 normal = interiorSwizzle(mInterior->normal[plane.normalIndex]);
+         slm::vec3 normal = interiorSwizzle(block.interior->normal[plane.normalIndex]);
          if (surface.planeFlipped)
             normal *= -1.0f;
 
-         const DIF::Interior::TexGenEq& texGenEq = mInterior->texGenEq[surface.texGenIndex];
-         const uint32_t firstIndex = (uint32_t)mPacked.indices.size();
-         const uint32_t firstVertex = (uint32_t)mPacked.verts.size();
+         const DIF::Interior::TexGenEq& texGenEq = block.interior->texGenEq[surface.texGenIndex];
+         const uint32_t firstIndex = (uint32_t)block.packed.indices.size();
+         const uint32_t firstVertex = (uint32_t)block.packed.verts.size();
          uint32_t triangleCount = 0;
 
          for (uint32_t j = surface.windingStart + 2; j < surface.windingStart + surface.windingCount; ++j)
          {
             const bool flipWinding = ((j - (surface.windingStart + 2)) % 2) != 0;
-            const uint32_t i0 = mInterior->index[j - 2];
-            const uint32_t i1 = mInterior->index[j - 1];
-            const uint32_t i2 = mInterior->index[j - 0];
+            const uint32_t i0 = block.interior->index[j - 2];
+            const uint32_t i1 = block.interior->index[j - 1];
+            const uint32_t i2 = block.interior->index[j - 0];
 
-            if (i0 >= mInterior->point.size() ||
-                i1 >= mInterior->point.size() ||
-                i2 >= mInterior->point.size())
+            if (i0 >= block.interior->point.size() ||
+                i1 >= block.interior->point.size() ||
+                i2 >= block.interior->point.size())
                continue;
 
-            const glm::vec3 p0 = mInterior->point[flipWinding ? i2 : i0];
-            const glm::vec3 p1 = mInterior->point[i1];
-            const glm::vec3 p2 = mInterior->point[flipWinding ? i0 : i2];
+            const glm::vec3 p0 = block.interior->point[flipWinding ? i2 : i0];
+            const glm::vec3 p1 = block.interior->point[i1];
+            const glm::vec3 p2 = block.interior->point[flipWinding ? i0 : i2];
 
             const slm::vec3 v0 = interiorSwizzle(p0);
             const slm::vec3 v1 = interiorSwizzle(p1);
@@ -161,20 +223,20 @@ public:
             const slm::vec2 uv1(interiorPlaneDistance(texGenEq.planeX, slm::vec3(p1.x, p1.y, p1.z)), interiorPlaneDistance(texGenEq.planeY, slm::vec3(p1.x, p1.y, p1.z)));
             const slm::vec2 uv2(interiorPlaneDistance(texGenEq.planeX, slm::vec3(p2.x, p2.y, p2.z)), interiorPlaneDistance(texGenEq.planeY, slm::vec3(p2.x, p2.y, p2.z)));
 
-            if (mPacked.verts.size() + 3 >= 65535)
+            if (block.packed.verts.size() + 3 >= 65535)
                break;
 
-            mPacked.verts.push_back({v0, normal});
-            mPacked.verts.push_back({v1, normal});
-            mPacked.verts.push_back({v2, normal});
+            block.packed.verts.push_back({v0, normal});
+            block.packed.verts.push_back({v1, normal});
+            block.packed.verts.push_back({v2, normal});
 
-            mPacked.texVerts.push_back({uv0});
-            mPacked.texVerts.push_back({uv1});
-            mPacked.texVerts.push_back({uv2});
+            block.packed.texVerts.push_back({uv0});
+            block.packed.texVerts.push_back({uv1});
+            block.packed.texVerts.push_back({uv2});
 
-            mPacked.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 0));
-            mPacked.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 1));
-            mPacked.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 2));
+            block.packed.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 0));
+            block.packed.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 1));
+            block.packed.indices.push_back((uint16_t)(firstVertex + triangleCount * 3 + 2));
             triangleCount++;
          }
 
@@ -184,9 +246,48 @@ public:
             part.materialIndex = (uint32_t)surface.textureIndex;
             part.firstIndex = firstIndex;
             part.indexCount = triangleCount * 3;
-            mParts.push_back(part);
+            block.parts.push_back(part);
          }
       }
+   }
+
+   bool buildRenderableBlock(RenderableBlock& block, uint32_t modelId)
+   {
+      block.modelId = modelId;
+      block.geometryReady = false;
+
+      if (!block.interior)
+         return false;
+
+      block.materials.free();
+      for (const std::string& materialName : block.interior->materialName)
+         block.materials.push_back(materialName.c_str());
+      if (block.materials.mMaterials.empty())
+         block.materials.push_back("");
+
+      mMaterialList = &block.materials;
+      initMaterials();
+      block.activeMaterials = mActiveMaterials;
+
+      buildPackedGeometry(block);
+      if (block.packed.verts.empty() || block.packed.indices.empty())
+      {
+         GFXClearModelData(modelId);
+         return false;
+      }
+
+      GFXLoadModelData(modelId,
+                       block.packed.verts.empty() ? NULL : &block.packed.verts[0],
+                       block.packed.texVerts.empty() ? NULL : &block.packed.texVerts[0],
+                       block.packed.indices.empty() ? NULL : &block.packed.indices[0],
+                       NULL,
+                       (uint32_t)block.packed.verts.size(),
+                       (uint32_t)block.packed.texVerts.size(),
+                       (uint32_t)block.packed.indices.size(),
+                       0);
+
+      block.geometryReady = true;
+      return true;
    }
 
    bool loadInterior(const char* filename, int pathIdx = -1)
@@ -220,34 +321,49 @@ public:
       }
 
       mInterior = &mDIF.interior[0];
-      mInteriorMaterials.free();
-      for (const std::string& materialName : mInterior->materialName)
+      mBlocks.reserve(mDIF.interior.size() + mDIF.subObject.size());
+
+      for (size_t i = 0; i < mDIF.interior.size(); ++i)
       {
-         mInteriorMaterials.push_back(materialName.c_str());
+         RenderableBlock block;
+         block.interior = &mDIF.interior[i];
+         block.label = (i == 0) ? "Main Interior" : ("Interior " + std::to_string(i));
+         buildRenderableBlock(block, (uint32_t)mBlocks.size());
+         mBlocks.push_back(std::move(block));
       }
-      if (mInteriorMaterials.mMaterials.empty())
-         mInteriorMaterials.push_back("");
 
-      mMaterialList = &mInteriorMaterials;
-      initMaterials();
+      for (size_t i = 0; i < mDIF.subObject.size(); ++i)
+      {
+         RenderableBlock block;
+         block.interior = &mDIF.subObject[i];
+         block.label = "SubObject " + std::to_string(i);
+         buildRenderableBlock(block, (uint32_t)mBlocks.size());
+         mBlocks.push_back(std::move(block));
+      }
 
-      buildPackedGeometry();
-      if (mPacked.verts.empty() || mPacked.indices.empty())
+      bool anyRenderable = false;
+      for (const RenderableBlock& block : mBlocks)
+      {
+         if (block.geometryReady && !block.parts.empty())
+         {
+            anyRenderable = true;
+            break;
+         }
+      }
+
+      if (!anyRenderable)
       {
          fprintf(stderr, "interior '%s' produced no renderable geometry\n", filename ? filename : "<null>");
          clear();
          return false;
       }
 
-      GFXLoadModelData(0,
-                       mPacked.verts.empty() ? NULL : &mPacked.verts[0],
-                       mPacked.texVerts.empty() ? NULL : &mPacked.texVerts[0],
-                       mPacked.indices.empty() ? NULL : &mPacked.indices[0],
-                       NULL,
-                       (uint32_t)mPacked.verts.size(),
-                       (uint32_t)mPacked.texVerts.size(),
-                       (uint32_t)mPacked.indices.size(),
-                       0);
+      mSelectedBlockIdx = 0;
+      while (mSelectedBlockIdx < (int)mBlocks.size() && (!mBlocks[mSelectedBlockIdx].geometryReady || mBlocks[mSelectedBlockIdx].parts.empty()))
+         ++mSelectedBlockIdx;
+      if (mSelectedBlockIdx >= (int)mBlocks.size())
+         mSelectedBlockIdx = 0;
+      syncSelectedBlockMaterialState();
 
       mGeometryReady = true;
       mLightPos = slm::vec3(0.0f, -2.0f, 2.0f);
@@ -259,38 +375,56 @@ public:
 
    void render()
    {
-      if (!mGeometryReady || mInterior == NULL || mParts.empty())
+      if (!mGeometryReady || mInterior == NULL || mBlocks.empty())
          return;
 
       updateMVP();
-      GFXSetModelVerts(0, 0, 0, 0, 0);
-
-      for (const InteriorPart& part : mParts)
+      for (const RenderableBlock& block : mBlocks)
       {
-         if (part.materialIndex >= mMaterialList->mMaterials.size())
+         if (!block.enabled || !block.geometryReady || block.parts.empty())
             continue;
 
-         const MaterialList::Material& mat = mMaterialList->mMaterials[part.materialIndex];
-         const uint32_t materialFlags = mat.tsProps.flags;
-         const uint32_t textureGroupID = part.materialIndex < mActiveMaterials.size()
-            ? mActiveMaterials[part.materialIndex].texGroupID
-            : 0;
-         const ModelPipelineState pipelineState = calcPipelineState(materialFlags);
+         GFXSetModelVerts(block.modelId, 0, 0, 0, 0);
 
-         GFXBeginBasicModelPipelineState(pipelineState, textureGroupID, 1.1f, false, false);
-         GFXSetTSPipelineProps(0,
-                               0,
-                               slm::vec4(0.0f),
-                               slm::vec4(0.0f),
-                               materialFlags,
-                               false,
-                               mDebugRenderNormals,
-                               mDisableLighting,
-                               slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
-                               1.0e-4f);
+         for (const InteriorPart& part : block.parts)
+         {
+            if (part.materialIndex >= block.materials.mMaterials.size())
+               continue;
 
-         GFXDrawModelPrims((uint32_t)mPacked.verts.size(), part.indexCount, part.firstIndex, 0);
+            const MaterialList::Material& mat = block.materials.mMaterials[part.materialIndex];
+            const uint32_t materialFlags = mat.tsProps.flags;
+            const uint32_t textureGroupID = part.materialIndex < block.activeMaterials.size()
+               ? block.activeMaterials[part.materialIndex].texGroupID
+               : 0;
+            const ModelPipelineState pipelineState = calcPipelineState(materialFlags);
+
+            GFXBeginBasicModelPipelineState(pipelineState, textureGroupID, 1.1f, false, false);
+            GFXSetTSPipelineProps(0,
+                                  0,
+                                  slm::vec4(0.0f),
+                                  slm::vec4(0.0f),
+                                  materialFlags,
+                                  false,
+                                  mDebugRenderNormals,
+                                  mDisableLighting,
+                                  slm::vec4(1.0f, 0.2f, 0.0f, 1.0f),
+                                  1.0e-4f);
+
+            GFXDrawModelPrims((uint32_t)block.packed.verts.size(), part.indexCount, part.firstIndex, 0);
+         }
       }
+   }
+
+   void reloadMaterials()
+   {
+      clearTextures();
+      for (RenderableBlock& block : mBlocks)
+      {
+         mMaterialList = &block.materials;
+         initMaterials();
+         block.activeMaterials = mActiveMaterials;
+      }
+      syncSelectedBlockMaterialState();
    }
 };
 
@@ -449,17 +583,52 @@ public:
       }
       ImGui::End();
 
+      ImGui::Begin("Blocks");
+      if (mViewer.mBlocks.empty())
+      {
+         ImGui::TextUnformatted("No interior blocks loaded.");
+      }
+      else
+      {
+         ImGui::Text("Blocks: %zu", mViewer.mBlocks.size());
+         ImGui::Separator();
+         for (int i = 0; i < (int)mViewer.mBlocks.size(); ++i)
+         {
+            InteriorViewer::RenderableBlock& block = mViewer.mBlocks[i];
+            bool enabled = block.enabled;
+            char enabledId[64];
+            snprintf(enabledId, sizeof(enabledId), "##block_enabled_%d", i);
+            if (ImGui::Checkbox(enabledId, &enabled))
+               block.enabled = enabled;
+
+            ImGui::SameLine();
+            const bool selected = (i == mViewer.mSelectedBlockIdx);
+            char blockId[128];
+            snprintf(blockId, sizeof(blockId), "%s##block_sel_%d", block.label.c_str(), i);
+            if (ImGui::Selectable(blockId, selected))
+            {
+               mViewer.mSelectedBlockIdx = i;
+               mViewer.syncSelectedBlockMaterialState();
+               mSelectedMaterialIdx = 0;
+            }
+            if (selected)
+               ImGui::SetItemDefaultFocus();
+         }
+      }
+      ImGui::End();
+
       if (mRenderMaterials)
       {
          ImGui::Begin("Materials");
-         if (mViewer.mInterior == NULL || mViewer.mMaterialList == NULL)
+         InteriorViewer::RenderableBlock* selectedBlock = mViewer.getSelectedBlock();
+         if (mViewer.mInterior == NULL || selectedBlock == NULL)
          {
             ImGui::TextUnformatted("No interior loaded.");
             ImGui::End();
          }
          else
          {
-            const int materialCount = (int)mViewer.mMaterialList->mMaterials.size();
+            const int materialCount = (int)selectedBlock->materials.mMaterials.size();
             if (materialCount <= 0)
             {
                ImGui::TextUnformatted("No interior materials.");
@@ -469,9 +638,10 @@ public:
 
             mSelectedMaterialIdx = std::clamp(mSelectedMaterialIdx, 0, materialCount - 1);
 
+            ImGui::Text("Block: %s", selectedBlock->label.c_str());
             ImGui::Text("Total: %d  Surfaces: %zu",
                         materialCount,
-                        mViewer.mInterior->surface.size());
+                        selectedBlock->interior ? selectedBlock->interior->surface.size() : 0);
             ImGui::Separator();
             ImGui::Columns(2, "interior_materials_columns", true);
 
@@ -479,7 +649,7 @@ public:
             {
                for (int i = 0; i < materialCount; ++i)
                {
-                  const MaterialList::Material& mat = mViewer.mMaterialList->mMaterials[i];
+                  const MaterialList::Material& mat = selectedBlock->materials.mMaterials[i];
                   const bool selected = i == mSelectedMaterialIdx;
                   const char* matName = mat.name.empty() ? "<blank>" : mat.name.c_str();
                   char entryLabel[1024];
@@ -496,8 +666,8 @@ public:
 
             ImGui::NextColumn();
 
-            const MaterialList::Material& mat = mViewer.mMaterialList->mMaterials[mSelectedMaterialIdx];
-            const GenericViewer::ActiveMaterial* activeMat = mSelectedMaterialIdx < (int)mViewer.mActiveMaterials.size() ? &mViewer.mActiveMaterials[mSelectedMaterialIdx] : NULL;
+            const MaterialList::Material& mat = selectedBlock->materials.mMaterials[mSelectedMaterialIdx];
+            const GenericViewer::ActiveMaterial* activeMat = mSelectedMaterialIdx < (int)selectedBlock->activeMaterials.size() ? &selectedBlock->activeMaterials[mSelectedMaterialIdx] : NULL;
             const GenericViewer::LoadedTexture* tex = activeMat ? &activeMat->tex : NULL;
             void* textureHandle = tex ? GFXGetTextureViewHandle(tex->texID) : NULL;
 
