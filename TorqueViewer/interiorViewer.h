@@ -302,6 +302,7 @@ public:
    DIF::Interior* mInterior;
    float xRot, yRot;
    bool mRenderMaterials;
+   int mSelectedMaterialIdx;
 
    InteriorViewerController(SDL_Window* window, ResManager* mgr)
       : mViewer(mgr)
@@ -314,6 +315,7 @@ public:
       xRot = 0.0f;
       yRot = 0.0f;
       mRenderMaterials = true;
+      mSelectedMaterialIdx = 0;
       mViewer.mDirectionalLight = true;
       mViewer.mLightFollowsCamera = true;
       mViewer.mScaleLightByShapeRadius = true;
@@ -346,6 +348,7 @@ public:
       mCamRot = slm::vec3(0.0f);
       xRot = 0.0f;
       yRot = 0.0f;
+      mSelectedMaterialIdx = 0;
       return true;
    }
 
@@ -456,16 +459,88 @@ public:
          }
          else
          {
-            ImGui::Text("Materials: %zu  Surfaces: %zu",
-                        mViewer.mMaterialList->mMaterials.size(),
+            const int materialCount = (int)mViewer.mMaterialList->mMaterials.size();
+            if (materialCount <= 0)
+            {
+               ImGui::TextUnformatted("No interior materials.");
+               ImGui::End();
+               return;
+            }
+
+            mSelectedMaterialIdx = std::clamp(mSelectedMaterialIdx, 0, materialCount - 1);
+
+            ImGui::Text("Total: %d  Surfaces: %zu",
+                        materialCount,
                         mViewer.mInterior->surface.size());
             ImGui::Separator();
-            for (size_t i = 0; i < mViewer.mMaterialList->mMaterials.size(); ++i)
+            ImGui::Columns(2, "interior_materials_columns", true);
+
+            if (ImGui::BeginListBox("##interior_material_list", ImVec2(-FLT_MIN, 320.0f)))
             {
-               const MaterialList::Material& mat = mViewer.mMaterialList->mMaterials[i];
-               const GenericViewer::LoadedTexture* tex = i < mViewer.mActiveMaterials.size() ? &mViewer.mActiveMaterials[i].tex : NULL;
-               ImGui::Text("%03zu  %s  tex=%d", i, mat.name.empty() ? "<blank>" : mat.name.c_str(), tex ? tex->texID : -1);
+               for (int i = 0; i < materialCount; ++i)
+               {
+                  const MaterialList::Material& mat = mViewer.mMaterialList->mMaterials[i];
+                  const bool selected = i == mSelectedMaterialIdx;
+                  const char* matName = mat.name.empty() ? "<blank>" : mat.name.c_str();
+                  char entryLabel[1024];
+                  snprintf(entryLabel, sizeof(entryLabel), "%s##imat_%d", matName, i);
+                  if (ImGui::Selectable(entryLabel, selected))
+                     mSelectedMaterialIdx = i;
+                  if (ImGui::IsItemFocused())
+                     mSelectedMaterialIdx = i;
+                  if (selected)
+                     ImGui::SetItemDefaultFocus();
+               }
+               ImGui::EndListBox();
             }
+
+            ImGui::NextColumn();
+
+            const MaterialList::Material& mat = mViewer.mMaterialList->mMaterials[mSelectedMaterialIdx];
+            const GenericViewer::ActiveMaterial* activeMat = mSelectedMaterialIdx < (int)mViewer.mActiveMaterials.size() ? &mViewer.mActiveMaterials[mSelectedMaterialIdx] : NULL;
+            const GenericViewer::LoadedTexture* tex = activeMat ? &activeMat->tex : NULL;
+            void* textureHandle = tex ? GFXGetTextureViewHandle(tex->texID) : NULL;
+
+            ImGui::Text("Index: %d", mSelectedMaterialIdx);
+            ImGui::TextWrapped("Name: %s", mat.name.empty() ? "<blank>" : mat.name.c_str());
+            ImGui::Separator();
+            ImGui::Text("Flags: 0x%04x", mat.tsProps.flags);
+            ImGui::Text("Reflect: %d  Bump: %d  Detail: %d",
+                        mat.tsProps.reflectanceMap, mat.tsProps.bumpMap, mat.tsProps.detailMap);
+            ImGui::Text("DetailScale: %.3f  ReflectAmt: %.3f",
+                        mat.tsProps.detailScale, mat.tsProps.reflectionAmount);
+
+            if (activeMat)
+            {
+               ImGui::Text("TexID: %d  Group: %u", activeMat->tex.texID, activeMat->texGroupID);
+               ImGui::Text("Size: %ux%u", activeMat->tex.width, activeMat->tex.height);
+            }
+            else
+            {
+               ImGui::TextUnformatted("No runtime material state.");
+            }
+
+            if (textureHandle)
+            {
+               ImGui::Separator();
+               ImGui::TextUnformatted("Preview");
+               float maxPreview = 256.0f;
+               float previewW = tex->width > 0 ? (float)tex->width : maxPreview;
+               float previewH = tex->height > 0 ? (float)tex->height : maxPreview;
+               float scale = 1.0f;
+               if (previewW > maxPreview || previewH > maxPreview)
+                  scale = std::min(maxPreview / previewW, maxPreview / previewH);
+               previewW *= scale;
+               previewH *= scale;
+               ImGui::Image((ImTextureID)textureHandle, ImVec2(previewW, previewH));
+            }
+            else
+            {
+               ImGui::Separator();
+               ImGui::TextUnformatted("Preview unavailable.");
+            }
+
+            ImGui::Columns(1);
             ImGui::End();
          }
       }
